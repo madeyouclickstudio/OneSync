@@ -1,0 +1,80 @@
+{
+  // OneSync default configuration shipped with the MSI.
+  // Replace placeholder GUIDs and SharePoint URLs with your tenant's
+  // real values before deploying. See config.template.json for
+  // documentation of every setting.
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "clientId": "00000000-0000-0000-0000-000000000000",
+  "authority": "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000",
+  "localStorageRoot": "%LOCALAPPDATA%\\OneSync\\Drives",
+  "drives": [
+    {
+      "letter": "H",
+      "label": "Home Folder",
+      "type": "onedrive",
+      "remotePath": "/",
+      "syncMode": "bidirectional",
+      "priority": 1,
+      "folderRedirection": [
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Music",
+        "Pictures",
+        "Videos"
+      ]
+    }
+  ],
+  "driveFiltering": {
+    "enabled": true,
+    "checkPermissionsAtStartup": true,
+    "skipDriveOn403": true,
+    "logSkippedDrives": true
+  },
+  "cleanup": {
+    "cleanOnLogoff": true,
+    "cleanOnLogon": true,
+    "cleanupDelayAfterSyncFlushSeconds": 5,
+    "preserveAuthCache": true,
+    "preserveLogs": true,
+    "preserveQuotaCache": true
+  },
+  "syncSettings": {
+    "pollIntervalSeconds": 300,
+    "maxConcurrentUploads": 3,
+    "maxConcurrentHydrations": 4,
+    "maxConcurrentGraphRequests": 8,
+    "shutdownTimeoutSeconds": 90,
+    "maxFileSizeMB": 250,
+    "excludePatterns": [
+      "*.tmp",
+      "*.~tmp",
+      "~$*",
+      "Thumbs.db",
+      "desktop.ini",
+      ".ds_store",
+      "*.lnk",
+      "*.crdownload",
+      "*.part",
+      "*.partial",
+      "*.crswap"
+    ],
+    "quotaRefreshIntervalSeconds": 300,
+    "deltaQueryIntervalSeconds": 300,
+    "uploadDebounceMs": 2000,
+    "maxRetries": 5,
+    "retryBackoffBaseSeconds": 30,
+    "maxRetryAfterSeconds": 600,
+    "evictionEnabled": true,
+    "evictionFreeSpaceThresholdGB": 2,
+    "evictionTargetFreeSpaceGB": 4,
+    "evictionCheckIntervalSeconds": 60,
+    "evictionMinAgeMinutes": 15
+  },
+  "logging": {
+    "level": "Information",
+    "path": "%LOCALAPPDATA%\\OneSync\\Logs",
+    "maxSizeMB": 50,
+    "maxFiles": 10
+  }
+}

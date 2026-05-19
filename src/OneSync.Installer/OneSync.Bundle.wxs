@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OneSync bootstrap bundle (OneSyncSetup.exe).
+
+  Wraps the Dokan kernel-driver MSI and OneSync.msi into a single chained
+  installer so a fresh machine gets both with one double-click. Replaces the
+  previous Install-OneSync.ps1 path: instead of "deploy two MSIs + run a
+  PowerShell wrapper", IT pushes OneSyncSetup.exe via Intune/SCCM/PDQ.
+
+  Build with:
+    wix build OneSync.Bundle.wxs -arch x64 \
+      -ext WixToolset.Bal.wixext \
+      -d SourceDir=<repo-root> \
+      -out <repo-root>/dist/OneSyncSetup.exe
+
+  IMPORTANT: build.ps1 builds OneSync.msi first and then this bundle, so
+  the bundle's MsiPackage references resolve. Don't try to build the bundle
+  before OneSync.msi exists.
+
+  Dokan MSI details (extracted with Windows Installer COM):
+    ProductCode = {9A7325EA-D3C9-0201-0000-231222144112}
+    UpgradeCode = {31A8F445-2AC6-494B-819C-4F4E1B2AECF1}
+    Version     = 2.1.0.1000
+  Burn reads these directly from the MSI at build time; we don't repeat them.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+
+  <Bundle Name="OneSync"
+          Manufacturer="madeyouclick studio"
+          Version="1.4.0.0"
+          UpgradeCode="A5F7C231-9E14-4C90-8B0D-3F5E2A1D8B40"
+          IconSourceFile="$(var.SourceDir)\src\OneSync.Installer\stage\icon.ico">
+
+    <BootstrapperApplication>
+      <!-- LogoFile must be a small PNG sized for the rtfLicense theme's logo
+           slot (~64x64). Passing a multi-size .ico makes WixStdBA pick the
+           largest variant (256x256) and overflow the slot. -->
+      <bal:WixStandardBootstrapperApplication
+        LicenseFile="$(var.SourceDir)\src\OneSync.Installer\stage\License.rtf"
+        LogoFile="$(var.SourceDir)\src\OneSync.Installer\stage\logo.png"
+        Theme="rtfLicense"
+        SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <!-- 1. Dokan kernel-driver library.
+           - Permanent="yes": leave Dokan installed when OneSync is uninstalled.
+             Other Dokan-using apps (e.g. the legacy Cloud Drive Mapper) may
+             share the install; ripping it out on OneSync uninstall would
+             break them.
+           - Visible="yes": stays in Add/Remove Programs as its own entry so
+             admins can manage it independently.
+           - Burn detects "already installed" by UpgradeCode + ProductVersion,
+             so re-running the bundle on a machine with Dokan present is a
+             no-op for this package. -->
+      <MsiPackage Id="DokanMsi"
+                  SourceFile="$(var.SourceDir)\dist\Dokan_x64.msi"
+                  DisplayName="Dokan Library 2.1.0 (x64)"
+                  Vital="yes"
+                  Permanent="yes"
+                  Visible="yes" />
+
+      <!-- 2. OneSync itself. The MSI's EnsureDokanDriverService custom action
+           runs at install time and re-registers the dokan2 service if it's
+           missing - which catches the failure mode where Dokan's MSI thinks
+           it's installed (registry says so) but the kernel service was
+           dropped by some prior uninstall/upgrade cycle. -->
+      <MsiPackage Id="OneSyncMsi"
+                  SourceFile="$(var.SourceDir)\src\OneSync.Installer\OneSync.msi"
+                  DisplayName="OneSync"
+                  Vital="yes" />
+    </Chain>
+
+  </Bundle>
+</Wix>

@@ -1,0 +1,38 @@
+// Resource file for OneSyncShellOverlay.dll
+// Icon indexes match the iconIndex values in DllMain.cpp's DllGetClassObject.
+
+#include <windows.h>
+
+// Icon resources. Resource IDs 1..3 map to positional icon indexes 0..2,
+// which is what DllGetClassObject hands to Explorer via GetOverlayInfo.
+1  ICON "icons\\syncing.ico"
+2  ICON "icons\\synced.ico"
+3  ICON "icons\\error.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,14,0
+ PRODUCTVERSION 1,0,14,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x2L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "OneSync"
+            VALUE "FileDescription",  "OneSync Shell Overlay Handler"
+            VALUE "FileVersion",      "1.0.14.0"
+            VALUE "InternalName",     "OneSyncShellOverlay"
+            VALUE "OriginalFilename", "OneSyncShellOverlay.dll"
+            VALUE "ProductName",      "OneSync"
+            VALUE "ProductVersion",   "1.0.14.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OneSync MSI definition.
+
+  IMPORTANT: this MSI MUST be built with `wix build … -arch x64` (or via
+  build.ps1, which sets it for you). WiX v6 defaults to x86, which would
+  cause `ProgramFiles64Folder` to silently resolve to the 32-bit
+  Program Files (x86) folder and the install to land in the wrong place.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="OneSync"
+           Manufacturer="madeyouclick studio"
+           Version="1.4.0.0"
+           UpgradeCode="E4D2945E-D0FF-4399-9FAB-A5185AB4D092"
+           Scope="perMachine"
+           InstallerVersion="500">
+
+    <SummaryInformation Keywords="Installer"
+                        Description="OneSync"
+                        Manufacturer="madeyouclick studio" />
+
+    <!-- AllowSameVersionUpgrades makes "/i" on the same MSI version replace
+         files cleanly. Without it, MSI treats same-version as a no-op and
+         requires REINSTALLMODE=amus on the command line to force replacement.
+         This is what makes dev iteration painful and what would also confuse
+         IT teams pushing minor config updates via the same MSI. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of OneSync is already installed."
+                  Schedule="afterInstallInitialize"
+                  AllowSameVersionUpgrades="yes" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Standard properties -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <Feature Id="ProductFeature" Title="OneSync" Level="1" AllowAdvertise="no" AllowAbsent="no">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+      <ComponentRef Id="DesktopShortcutComponent" />
+      <ComponentRef Id="StartupShortcutComponent" />
+      <ComponentRef Id="RegistryComponent" />
+      <ComponentRef Id="ShellOverlayDllComponent" />
+      <ComponentRef Id="OfficeLauncherProgIdComponent" />
+      <ComponentRef Id="DocxAssociationComponent" />
+      <ComponentRef Id="XlsxAssociationComponent" />
+      <ComponentRef Id="PptxAssociationComponent" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="OneSync" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+    <StandardDirectory Id="StartupFolder" />
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExeComponent" Guid="*">
+        <File Id="OneSyncExe"
+              Source="$(var.SourceDir)\OneSync.exe"
+              KeyPath="yes" />
+      </Component>
+      <!-- config.json is user-customisable. Stable GUID + NeverOverwrite="yes"
+           lets MSI track this component across upgrades and preserve the file
+           if it already exists — so an admin's tenant IDs and drive list
+           survive `msiexec /i` of a newer build. First install places the
+           placeholder; subsequent upgrades leave the customised file alone.
+           Stable GUID is intentional and MUST NOT be regenerated. -->
+      <Component Id="ConfigComponent"
+                 Guid="1D69B5A2-7C1F-4E8E-A2D8-3F2B5C8D9E0A"
+                 NeverOverwrite="yes">
+        <File Id="ConfigJson"
+              Source="$(var.SourceDir)\config.json"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="ConfigTemplateComponent" Guid="*">
+        <File Id="ConfigTemplateJson"
+              Source="$(var.SourceDir)\config.template.json"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="ReadmeComponent" Guid="*">
+        <File Id="ReadmeMd"
+              Source="$(var.SourceDir)\README.md"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="DriveIconComponent" Guid="*">
+        <File Id="OneDriveFolderIco"
+              Source="$(var.SourceDir)\OneDriveFolder.ico"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="TrayIconComponent" Guid="*">
+        <File Id="IconIco"
+              Source="$(var.SourceDir)\icon.ico"
+              KeyPath="yes" />
+      </Component>
+      <!-- Self-heal script: re-registers the dokan2 kernel-driver service
+           if the library is present but the service is missing. Invoked by
+           the EnsureDokanDriverService custom action after InstallFiles. -->
+      <Component Id="EnsureDokanCmdComponent" Guid="*">
+        <File Id="EnsureDokanCmd"
+              Source="$(var.SourceDir)\ensure-dokan.cmd"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Shell icon overlay handler DLL. Registered via regsvr32 in a custom
+         action after install, unregistered before uninstall. -->
+    <Component Id="ShellOverlayDllComponent" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="ShellOverlayDll"
+            Source="$(var.SourceDir)\OneSyncShellOverlay.dll"
+            KeyPath="yes" />
+    </Component>
+
+    <!-- Registry key for tracking install -->
+    <Component Id="RegistryComponent" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryKey Root="HKLM" Key="SOFTWARE\OneSync">
+        <RegistryValue Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RegistryValue Name="Version" Type="string" Value="1.4.0.0" />
+      </RegistryKey>
+    </Component>
+
+    <!-- Start Menu shortcut: discoverability + manual launch -->
+    <Component Id="StartMenuShortcutComponent" Directory="ProgramMenuFolder" Guid="*">
+      <Shortcut Id="StartMenuShortcut"
+                Name="OneSync"
+                Description="OneSync — cloud drive sync"
+                Target="[INSTALLFOLDER]OneSync.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="OneSyncIcon" />
+      <RegistryValue Root="HKCU" Key="Software\OneSync\Shortcuts"
+                     Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Public Desktop shortcut: visible on every user's desktop -->
+    <Component Id="DesktopShortcutComponent" Directory="DesktopFolder" Guid="*">
+      <Shortcut Id="DesktopShortcut"
+                Name="OneSync"
+                Description="OneSync — cloud drive sync"
+                Target="[INSTALLFOLDER]OneSync.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="OneSyncIcon" />
+      <RegistryValue Root="HKCU" Key="Software\OneSync\Shortcuts"
+                     Name="Desktop" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Common Startup shortcut: runs at every user's logon (replaces the scheduled task) -->
+    <Component Id="StartupShortcutComponent" Directory="StartupFolder" Guid="*">
+      <Shortcut Id="StartupShortcut"
+                Name="OneSync"
+                Description="OneSync — starts at logon"
+                Target="[INSTALLFOLDER]OneSync.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="OneSyncIcon" />
+      <RegistryValue Root="HKCU" Key="Software\OneSync\Shortcuts"
+                     Name="Startup" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Icon Id="OneSyncIcon" SourceFile="$(var.SourceDir)\icon.ico" />
+
+    <!-- ============================================================
+         Office file-association redirect
+         OneSync claims .docx/.xlsx/.pptx system-wide. When Explorer
+         opens one, OneSync.OfficeLauncher decides:
+           - Path inside H:/I:/J: AND we have a webUrl → launch Office
+             via ms-word:ofe|u|<url> (co-auth + AutoSave activate)
+           - Otherwise → launch Office with the local path directly
+         ============================================================ -->
+
+    <!-- Per-extension ProgIDs so Explorer can show the native Office icon
+         (Word/Excel/PowerPoint) for redirected files instead of a generic
+         OneSync icon. Each ProgID still routes through OneSync's launcher
+         for the redirect logic. -->
+
+    <Component Id="OfficeLauncherProgIdComponent" Directory="INSTALLFOLDER" Guid="*">
+      <!-- Word -->
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Docx">
+        <RegistryValue Type="string" Value="Microsoft Word Document" />
+        <RegistryValue Name="FriendlyTypeName" Type="string" Value="Microsoft Word Document" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Docx\DefaultIcon">
+        <RegistryValue Type="string" Value="C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE,1" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Docx\shell\open\command">
+        <RegistryValue Type="expandable" Value='"[INSTALLFOLDER]OneSync.exe" --launch-office "%1"' />
+      </RegistryKey>
+
+      <!-- Excel -->
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Xlsx">
+        <RegistryValue Type="string" Value="Microsoft Excel Worksheet" />
+        <RegistryValue Name="FriendlyTypeName" Type="string" Value="Microsoft Excel Worksheet" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Xlsx\DefaultIcon">
+        <RegistryValue Type="string" Value="C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE,1" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Xlsx\shell\open\command">
+        <RegistryValue Type="expandable" Value='"[INSTALLFOLDER]OneSync.exe" --launch-office "%1"' />
+      </RegistryKey>
+
+      <!-- PowerPoint -->
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Pptx">
+        <RegistryValue Type="string" Value="Microsoft PowerPoint Presentation" />
+        <RegistryValue Name="FriendlyTypeName" Type="string" Value="Microsoft PowerPoint Presentation" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Pptx\DefaultIcon">
+        <RegistryValue Type="string" Value="C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE,1" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="OneSync.OfficeRedirect.Pptx\shell\open\command">
+        <RegistryValue Type="expandable" Value='"[INSTALLFOLDER]OneSync.exe" --launch-office "%1"' />
+      </RegistryKey>
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\OneSync\OfficeLauncher"
+                     Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- File associations: make per-extension ProgID the DEFAULT so double-click
+         routes through OneSync (and gets the native Office icon for free). The
+         previous default is saved under SOFTWARE\OneSync\OfficeLauncher\Previous
+         so we can restore on uninstall. -->
+
+    <Component Id="DocxAssociationComponent" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryKey Root="HKCR" Key=".docx">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Docx" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".docx\OpenWithProgids">
+        <RegistryValue Name="OneSync.OfficeRedirect.Docx" Type="string" Value="" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".docm">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Docx" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".doc">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Docx" />
+      </RegistryKey>
+      <RegistryValue Root="HKLM" Key="SOFTWARE\OneSync\OfficeLauncher"
+                     Name="DocxAssoc" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Component Id="XlsxAssociationComponent" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryKey Root="HKCR" Key=".xlsx">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Xlsx" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".xlsx\OpenWithProgids">
+        <RegistryValue Name="OneSync.OfficeRedirect.Xlsx" Type="string" Value="" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".xlsm">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Xlsx" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".xls">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Xlsx" />
+      </RegistryKey>
+      <RegistryValue Root="HKLM" Key="SOFTWARE\OneSync\OfficeLauncher"
+                     Name="XlsxAssoc" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Component Id="PptxAssociationComponent" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryKey Root="HKCR" Key=".pptx">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Pptx" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".pptx\OpenWithProgids">
+        <RegistryValue Name="OneSync.OfficeRedirect.Pptx" Type="string" Value="" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".pptm">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Pptx" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key=".ppt">
+        <RegistryValue Type="string" Value="OneSync.OfficeRedirect.Pptx" />
+      </RegistryKey>
+      <RegistryValue Root="HKLM" Key="SOFTWARE\OneSync\OfficeLauncher"
+                     Name="PptxAssoc" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Launch OneSync via explorer.exe so the new process inherits the
+         user's medium-integrity token (not the installer's elevated one).
+         Direct FileRef launch from an MSI custom action inherits the
+         installer's integrity level — the launched OneSync runs elevated,
+         mounts Dokan drives at high IL, and those drive letters are then
+         invisible to the user's medium-IL Explorer. explorer.exe acts as
+         a shell-handoff: it dispatches the launch request to the already-
+         running user-session Explorer, which spawns OneSync.exe at the
+         user's IL. Same trick the README documents for manual launches. -->
+    <CustomAction Id="LaunchApp"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='explorer.exe "[INSTALLFOLDER]OneSync.exe"'
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
+    <!-- Stop OneSync gracefully first (WM_CLOSE → GracefulShutdown unmounts
+         Dokan drives cleanly), then force-kill only if it's still running
+         after a generous timeout. Hard /F without unmount leaves Dokan
+         filesystems orphaned, which causes Explorer to hang on I/O against
+         those drive letters during uninstall — the visible symptom is the
+         desktop going black and the Start menu becoming unresponsive. -->
+    <CustomAction Id="StopRunningApp"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='cmd.exe /c "taskkill /IM OneSync.exe &gt;nul 2&gt;&amp;1 &amp; ping -n 9 127.0.0.1 &gt;nul 2&gt;&amp;1 &amp; taskkill /F /IM OneSync.exe &gt;nul 2&gt;&amp;1 &amp; exit /b 0"'
+                  Execute="immediate"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="RegisterShellOverlay"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='regsvr32.exe /s "[INSTALLFOLDER]OneSyncShellOverlay.dll"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Self-heal Dokan: invoke the ensure-dokan.cmd script that ships in
+         INSTALLFOLDER. Runs deferred + LocalSystem so it has the rights to
+         register the kernel-driver service. Return="ignore" so a Dokan-side
+         hiccup doesn't block the OneSync install (OneSync.exe surfaces the
+         same actionable error at runtime if mounts fail). -->
+    <CustomAction Id="EnsureDokanDriverService"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='cmd.exe /c "[INSTALLFOLDER]ensure-dokan.cmd"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="UnregisterShellOverlay"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='regsvr32.exe /u /s "[INSTALLFOLDER]OneSyncShellOverlay.dll"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- After UnregisterShellOverlay, the COM registration is gone but the
+         DLL is still in Explorer's process memory until Explorer recycles.
+         MSI's RemoveFiles would then trip Restart Manager to forcibly close
+         Explorer, which on many systems leaves the taskbar / Start menu in
+         a broken state ("black screen"). Pre-empting RM: kill explorer.exe
+         ourselves, then explicitly start a new one in the user's session.
+         The new Explorer no longer loads the overlay (registration is gone),
+         so RemoveFiles deletes the DLL cleanly without RM involvement.
+         Impersonate="yes" runs the cmd line under the original user's token
+         so the spawned explorer.exe lands at user integrity level in the
+         interactive desktop, not Session 0.  -->
+    <CustomAction Id="RestartExplorerToReleaseShellOverlay"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='cmd.exe /c "taskkill /F /IM explorer.exe &gt;nul 2&gt;&amp;1 &amp; ping -n 2 127.0.0.1 &gt;nul 2&gt;&amp;1 &amp; start &quot;&quot; explorer.exe &amp; exit /b 0"'
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <!-- Safety-net: after RemoveFiles, make sure explorer.exe is alive.
+         If anything earlier killed it without respawn, this brings the
+         desktop back so the user isn't stuck on a black screen. -->
+    <CustomAction Id="EnsureExplorerRunning"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='cmd.exe /c "tasklist /FI &quot;IMAGENAME eq explorer.exe&quot; 2&gt;nul | find /I &quot;explorer.exe&quot; &gt;nul || start &quot;&quot; explorer.exe &amp; exit /b 0"'
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <!-- Force-clean shortcuts before MSI's RemoveFiles touches them. Defends
+         against environments where the .lnk's ACL has been stripped of SYSTEM /
+         Administrators (seen on managed/Intune machines), which would otherwise
+         fail uninstall with Error 1321. takeown + icacls reclaim rights, then
+         del removes the file. All errors swallowed so a clean machine is a
+         no-op. Runs deferred + LocalSystem so it has the rights to reset ACLs. -->
+    <CustomAction Id="ForceRemoveOrphanShortcuts"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='cmd.exe /c "takeown /F &quot;%PUBLIC%\Desktop\OneSync.lnk&quot; &gt;nul 2&gt;&amp;1 &amp; icacls &quot;%PUBLIC%\Desktop\OneSync.lnk&quot; /grant *S-1-5-32-544:F &gt;nul 2&gt;&amp;1 &amp; del /F /Q &quot;%PUBLIC%\Desktop\OneSync.lnk&quot; &gt;nul 2&gt;&amp;1 &amp; exit /b 0"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="StopRunningApp" Before="InstallFiles" Condition="REMOVE=&quot;ALL&quot; OR Installed" />
+      <Custom Action="UnregisterShellOverlay" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="RestartExplorerToReleaseShellOverlay" After="UnregisterShellOverlay" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="ForceRemoveOrphanShortcuts" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="EnsureExplorerRunning" After="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="RegisterShellOverlay" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="EnsureDokanDriverService" After="RegisterShellOverlay" Condition="NOT REMOVE" />
+      <Custom Action="LaunchApp" After="InstallFinalize" Condition="NOT REMOVE AND NOT Installed" />
+    </InstallExecuteSequence>
+
+    <!-- UI: simple install dialog -->
+    <ui:WixUI Id="WixUI_Minimal" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.SourceDir)\License.rtf" />
+
+  </Package>
+</Wix>

@@ -1,34 +1,13 @@
 {
   // ====================================================================
-  // OneSync configuration REFERENCE
-  // ====================================================================
+  // OneSync configuration template.
   //
-  // This file is a REFERENCE, not the file you edit on a deployed
-  // machine. The installer ships a minimal `config.json` with placeholder
-  // GUIDs at `C:\Program Files\OneSync\config.json` — edit THAT file
-  // in place. Just fill in `tenantId`, `clientId`, `authority`, and your
-  // drive list; every other setting has a sensible default and only
-  // needs to appear in your real config if you want to override it.
+  // 1. Copy this file to config.json (in the same folder as OneSync.exe).
+  // 2. Fill in tenantId / clientId from your Entra ID app registration.
+  // 3. Replace the SharePoint siteUrl examples with your own sites.
+  // 4. Tune syncSettings if needed; defaults are sensible for most schools.
   //
-  // Consult this template when you want to look up:
-  //   - What a particular setting does
-  //   - Its default value and acceptable range
-  //   - Whether it's safe to leave out
-  //
-  // The OneSync JSON loader accepts // line comments and trailing commas,
-  // so you can copy snippets from here into your real config without
-  // stripping the comments first.
-  //
-  // The minimal viable config is about 15 lines:
-  //
-  //   {
-  //     "tenantId":  "<your tenant GUID>",
-  //     "clientId":  "<your app registration client ID>",
-  //     "authority": "https://login.microsoftonline.com/<your tenant GUID>",
-  //     "drives": [
-  //       { "letter": "H", "label": "Home", "type": "onedrive", "remotePath": "/" }
-  //     ]
-  //   }
+  // The OneSync JSON loader accepts // line comments and trailing commas.
   // ====================================================================
 
   // The Microsoft 365 tenant GUID you're syncing against.
@@ -206,5 +185,82 @@
     "path": "%LOCALAPPDATA%\\OneSync\\Logs",
     "maxSizeMB": 50,
     "maxFiles": 10
+  },
+
+  // ====================================================================
+  // Cooperative polling — for shared SharePoint libraries at scale.
+  //
+  // Without this: every client independently runs a Graph delta poll
+  // against every drive every 5 minutes. Fine for one user, fatal at 1800
+  // (≈4,300 Graph req/min, well over the app cap of ~1,200/min).
+  //
+  // With this: one client per library is elected leader. Leader writes a
+  // delta cache file inside the library; everyone else reads from it.
+  // Steady-state Graph cost drops from O(users) to O(1) per library.
+  //
+  // SAFE TO LEAVE DISABLED. When disabled, every client polls per-user
+  // (the pre-1.3 behaviour). Pilot on a small group before enabling
+  // estate-wide.
+  // ====================================================================
+  "cooperativePolling": {
+    // Master switch. Default false. Flip to true after piloting on a
+    // small group; this is the most architecturally significant setting
+    // in the file.
+    "enabled": false,
+
+    // Folder name inside each library where OneSync writes the lock and
+    // delta cache. Default ".onesync". During pilots, use ".onesync-test"
+    // so the production namespace stays clean if you need to roll back.
+    "controlFolder": ".onesync",
+
+    // How long a leader's lock stays valid before peers consider it
+    // expired and take over. 600s (10 min) is comfortable above the
+    // 5-min renew interval.
+    "leaseTtlSeconds": 600,
+
+    // Leader renew cadence. Match readerPollIntervalSeconds so the
+    // worst-case staleness for any reader is ~one cycle.
+    "renewIntervalSeconds": 300,
+
+    // Reader cache-pull cadence. If-None-Match keeps unchanged pulls
+    // to a 304 round trip.
+    "readerPollIntervalSeconds": 300,
+
+    // How often readers run their OWN delta query (independent of the
+    // leader's cache) to catch items the leader couldn't see — folders
+    // with permission islands the leader has no access to. 60 min is
+    // a balance between freshness and Graph cost.
+    "selfCheckIntervalMinutes": 60,
+
+    // If true, Dokan FindFiles falls through to a live Graph query for
+    // folders absent from local placeholders. Important on Reader drives
+    // so users can navigate to permission-scoped folders even when the
+    // leader hasn't surfaced them via the cache. Leave true.
+    "lazyFallbackEnabled": true,
+
+    // Lazy fallback successful enumerations are remembered for this
+    // long before another live query runs. 300s prevents Explorer
+    // refresh storms from re-hitting Graph.
+    "lazyFallbackCacheSeconds": 300,
+
+    // Even when the cache content is unchanged, the leader forces a
+    // write every N renewal cycles so the WrittenAt timestamp stays
+    // fresh — readers use it to detect a stale/dead leader. 12 ticks
+    // at the 5-min cadence ≈ once an hour.
+    "cacheForceWriteEveryNCycles": 12,
+
+    // Sliding window for the cache: every folder is included (so the
+    // directory tree stays browsable) but files are only included if
+    // they've been modified within the last N days. Older files
+    // populate on demand via Dokan's lazy fallback when a user opens
+    // their folder in Explorer. For a 250k-item library this drops
+    // cache size from ~156 MB to ~20 MB. Default 30 days. Set to 0
+    // to ship a full snapshot every write (pre-1.2.25 behaviour).
+    "cacheItemMaxAgeDays": 30,
+
+    // DEVELOPMENT FLAG: when true, even the leader also runs the reader
+    // merge path on each tick, so a single-user dev build can exercise
+    // both code paths. PRODUCTION MUST LEAVE THIS FALSE.
+    "forceReaderRoleAlongsideLeader": false
   }
 }

@@ -71,5 +71,8 @@ BACKLOG.md
 Icon.png
 docs/measurements/
 
-# Binary-only distribution: source not published
-src/
+# Marketing / promo drafts (kept locally, not for public repo)
+linkedin-post.txt
+reddit-post-*.txt
+reddit-strategy.txt
+

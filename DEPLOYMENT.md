@@ -82,27 +82,42 @@ msiexec /i Dokan_x64.msi /qn /norestart
 
 ## Pushing config.json
 
-OneSync's tenant configuration (`tenantId`, `clientId`, `authority`, drive definitions) lives in `C:\Program Files\OneSync\config.json`. The installer ships a placeholder version — you need to replace it with your own.
+OneSync looks for `config.json` in three locations, in priority order:
+
+| Path | Purpose |
+|---|---|
+| `%LOCALAPPDATA%\OneSync\config.json` | Per-user — written by the first-run setup wizard. Wins over machine-wide. |
+| `%PROGRAMDATA%\OneSync\config.json` | **Machine-wide — recommended for IT deployment.** |
+| `C:\Program Files\OneSync\config.json` | Installer placeholder (all-zero GUIDs until you replace it). |
+
+For fleet deployment, drop your tenant `config.json` at `%PROGRAMDATA%\OneSync\config.json`. It's readable by all users, writable by admins, and OneSync picks it up before falling through to the installer placeholder — so the first-run wizard never fires on a managed machine. Individual users can still create a per-user override at `%LOCALAPPDATA%\OneSync\config.json` if they need a different drive set.
 
 **Three common patterns:**
 
-### 1. Copy after install (simplest)
+### 1. Copy to %PROGRAMDATA% (recommended)
 
 ```cmd
 :: After OneSync.msi or OneSyncSetup.exe runs
-xcopy /Y "\\fileserver\OneSync\config.json" "C:\Program Files\OneSync\config.json"
+md "%PROGRAMDATA%\OneSync" 2>nul
+xcopy /Y "\\fileserver\OneSync\config.json" "%PROGRAMDATA%\OneSync\"
 ```
 
-### 2. Intune Win32 app with pre/post script
+No admin file overwrite of `Program Files`, no UAC prompts on individual user logons, no risk of a future installer upgrade re-stamping the placeholder over your config.
 
-Package OneSyncSetup.exe + config.json together. Use the Win32 app install command:
+### 2. Intune Win32 app with bundled config
+
+Package `OneSyncSetup.exe` + your tenant `config.json` together. Win32 app install command:
 ```cmd
-cmd.exe /c "OneSyncSetup.exe /install /quiet /norestart && copy /Y config.json \"C:\Program Files\OneSync\config.json\""
+cmd.exe /c "OneSyncSetup.exe /install /quiet /norestart && (md ""%PROGRAMDATA%\OneSync"" 2>nul) && copy /Y config.json ""%PROGRAMDATA%\OneSync\config.json"""
 ```
 
 ### 3. Group Policy Preferences file copy
 
-Deploy OneSync.msi via "Software Installation" GPO, then use Computer Configuration → Preferences → Windows Settings → Files to copy `config.json` to the install folder on next logon.
+Deploy `OneSync.msi` via *Software Installation* GPO, then use *Computer Configuration → Preferences → Windows Settings → Files* to copy `config.json` to `%PROGRAMDATA%\OneSync\` on next logon. (Create the folder via *Preferences → Windows Settings → Folders* if it doesn't exist.)
+
+### Alternative: overwrite the installer placeholder
+
+If you'd rather drop the config straight into `C:\Program Files\OneSync\`, that works too — the placeholder lives there ready to be overwritten. Requires admin write access, and a future major-version reinstall could restore the placeholder. Use the `%PROGRAMDATA%` path above instead unless you have a specific reason.
 
 ## Office file associations (per-user, one-time)
 
@@ -158,15 +173,22 @@ You'll land on the Overview page. Note the **Application (client) ID** and **Dir
 
 This is what tells Entra that OneSync is a desktop app (no client secret) rather than a web app (needs a secret). **If you skip this step, sign-in will fail with `AADSTS7000218`.**
 
-### 3. Add the desktop-app platform + redirect URI
+### 3. Add the desktop-app platform + redirect URIs
 
 Still on the **Authentication** page:
 
 - Under **Platform configurations**, click **+ Add a platform**
 - A right-hand panel appears with three tile choices: **Web**, **Single-page application**, **Mobile and desktop applications**
 - Pick **Mobile and desktop applications** (NOT Web — that one expects a client secret and is for server-side apps)
-- On the next panel, tick the box next to `https://login.microsoftonline.com/common/oauth2/nativeclient`
+- On the next panel:
+  - Tick the box next to `https://login.microsoftonline.com/common/oauth2/nativeclient`
+  - Also tick the suggested URI `https://login.live.com/oauth20_desktop.srf` if shown
+  - In the **Custom redirect URIs** box, add **two more**:
+    - `http://localhost`  (used by OneSync's MSAL builder as the fallback browser redirect)
+    - `ms-appx-web://microsoft.aad.brokerplugin/<APPLICATION-CLIENT-ID>`  (the WAM-broker redirect — substitute the Application (client) ID you noted in step 1 for the `<APPLICATION-CLIENT-ID>` placeholder)
 - Click **Configure** at the bottom
+
+The WAM-broker URI is what enables silent SSO on domain-joined / Entra-joined Windows machines — without it, MSAL falls back to a browser sign-in popup on every launch.
 
 ### 4. Add the Graph permissions
 

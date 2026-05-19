@@ -1,0 +1,279 @@
+﻿<Window x:Class="OneSync.Widget.SyncStatusWidget"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        Width="300"
+        SizeToContent="Height"
+        ShowActivated="False">
+
+    <WindowChrome.WindowChrome>
+        <WindowChrome GlassFrameThickness="-1" ResizeBorderThickness="0" CaptionHeight="0"/>
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+
+        <SolidColorBrush x:Key="PrimaryText" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="SecondaryText" Color="#99FFFFFF"/>
+        <SolidColorBrush x:Key="TrackBrush" Color="#33FFFFFF"/>
+        <SolidColorBrush x:Key="AmberAccent" Color="#FFA726"/>
+
+        <Style x:Key="RetryBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource PrimaryText}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource TrackBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,3"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#22FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#33FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DismissBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource SecondaryText}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Width" Value="20"/>
+            <Setter Property="Height" Value="20"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#22FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border CornerRadius="8" ClipToBounds="True">
+        <Border.Background>
+            <SolidColorBrush x:Name="WindowBg" Color="#CC1A1A1A"/>
+        </Border.Background>
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="4"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Accent bar -->
+            <Border x:Name="AccentBar" Grid.Column="0" Background="#4CAF50"/>
+
+            <!-- Content -->
+            <StackPanel Grid.Column="1" Margin="12,10,12,10">
+
+                <!-- Toasts -->
+                <ItemsControl ItemsSource="{Binding Toasts}">
+                    <ItemsControl.Style>
+                        <Style TargetType="ItemsControl">
+                            <Style.Triggers>
+                                <Trigger Property="HasItems" Value="False">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ItemsControl.Style>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="#22FFFFFF" CornerRadius="4" Padding="8,6" Margin="0,0,0,6">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding Message}" Foreground="{StaticResource PrimaryText}"
+                                               FontSize="12" FontFamily="Segoe UI" TextWrapping="Wrap"/>
+                                    <Button Grid.Column="1" Content="&#x2715;" Style="{StaticResource DismissBtn}"
+                                            Command="{Binding DismissCommand}" Margin="4,0,0,0"
+                                            Visibility="{Binding IsPersistent, Converter={StaticResource BoolToVis}}"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Header -->
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock x:Name="HeaderIconText" Text="{Binding HeaderIcon}"
+                               FontSize="14" Foreground="{StaticResource PrimaryText}" Margin="0,0,8,0"
+                               VerticalAlignment="Center"/>
+                    <TextBlock Text="{Binding HeaderText}" FontSize="13" FontFamily="Segoe UI"
+                               Foreground="{StaticResource PrimaryText}" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Drive statuses (starting state) -->
+                <ItemsControl ItemsSource="{Binding DriveStatuses}" Margin="0,4,0,0">
+                    <ItemsControl.Style>
+                        <Style TargetType="ItemsControl">
+                            <Style.Triggers>
+                                <Trigger Property="HasItems" Value="False">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ItemsControl.Style>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" FontSize="12" FontFamily="Segoe UI"
+                                       Foreground="{StaticResource SecondaryText}" Margin="22,2,0,0"/>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Syncing files -->
+                <ItemsControl ItemsSource="{Binding SyncingFiles}" Margin="0,6,0,0" MaxHeight="260">
+                    <ItemsControl.Style>
+                        <Style TargetType="ItemsControl">
+                            <Style.Triggers>
+                                <Trigger Property="HasItems" Value="False">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ItemsControl.Style>
+                    <ItemsControl.Template>
+                        <ControlTemplate TargetType="ItemsControl">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <ItemsPresenter/>
+                            </ScrollViewer>
+                        </ControlTemplate>
+                    </ItemsControl.Template>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border x:Name="FileRow" Padding="0,4" Margin="0,2,0,0" Background="Transparent">
+                                <StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding FileName}" FontSize="12" FontFamily="Segoe UI"
+                                                   Foreground="{StaticResource PrimaryText}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Grid.Column="1" FontSize="12" FontFamily="Segoe UI"
+                                                   Foreground="{StaticResource SecondaryText}" Margin="8,0,0,0">
+                                            <Run Text="{Binding Progress, StringFormat={}{0:0}, Mode=OneWay}"/><Run Text="%"/>
+                                        </TextBlock>
+                                    </Grid>
+                                    <Grid Height="3" Margin="0,4,0,0">
+                                        <Border Background="{StaticResource TrackBrush}" CornerRadius="1.5"/>
+                                        <Border Background="{StaticResource AmberAccent}" CornerRadius="1.5"
+                                                HorizontalAlignment="Stretch"
+                                                RenderTransformOrigin="0,0.5">
+                                            <Border.RenderTransform>
+                                                <ScaleTransform ScaleX="{Binding ProgressFraction}"/>
+                                            </Border.RenderTransform>
+                                        </Border>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                            <DataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding State}" Value="Completed">
+                                    <DataTrigger.EnterActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <ColorAnimation
+                                                    Storyboard.TargetName="FileRow"
+                                                    Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)"
+                                                    From="#334CAF50" To="Transparent" Duration="0:0:0.5"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </DataTrigger.EnterActions>
+                                </DataTrigger>
+                            </DataTemplate.Triggers>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Error files -->
+                <ItemsControl ItemsSource="{Binding ErrorFiles}" Margin="0,6,0,0" MaxHeight="200">
+                    <ItemsControl.Style>
+                        <Style TargetType="ItemsControl">
+                            <Style.Triggers>
+                                <Trigger Property="HasItems" Value="False">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ItemsControl.Style>
+                    <ItemsControl.Template>
+                        <ControlTemplate TargetType="ItemsControl">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <ItemsPresenter/>
+                            </ScrollViewer>
+                        </ControlTemplate>
+                    </ItemsControl.Template>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="0,4" Margin="0,2,0,0">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding FileName}"
+                                               FontSize="12" FontFamily="Segoe UI"
+                                               Foreground="{StaticResource PrimaryText}"
+                                               TextTrimming="CharacterEllipsis"/>
+                                    <Button Grid.Row="0" Grid.Column="1" Grid.RowSpan="2"
+                                            Content="Retry" Style="{StaticResource RetryBtn}"
+                                            Command="{Binding RetryCommand}" VerticalAlignment="Center"
+                                            Margin="8,0,0,0"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding ErrorMessage}"
+                                               FontSize="11" FontFamily="Segoe UI"
+                                               Foreground="{StaticResource SecondaryText}"
+                                               TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Retry All button -->
+                <Button Content="Retry All" Style="{StaticResource RetryBtn}"
+                        Command="{Binding RetryAllCommand}" HorizontalAlignment="Stretch"
+                        Margin="0,8,0,0"
+                        Visibility="{Binding HasErrors, Converter={StaticResource BoolToVis}}"/>
+
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

@@ -30,7 +30,7 @@ OneSync wouldn't exist without two commercial tools that pioneered the drive-let
 - **[Cloud Drive Mapper](https://www.iamcloud.com/cloud-drive-mapper-overview/)** by IAMCloud — the gold standard in this space, particularly for large enterprise and multi-site education estates. If you're running thousands of seats across multiple tenants with complex governance requirements, their product is the right fit. Their work proved the model and shaped a lot of the UX expectations users now have.
 - **[ZeeDrive](https://www.zeedrive.com/)** — another well-built take on the same idea, lighter touch and great for smaller deployments.
 
-OneSync is a free alternative aimed at the gap between "I want this UX" and "I can justify a per-seat commercial licence." It's the right pick when your org is too small or budget-constrained for a paid product, but the OneDrive sync client is the wrong shape for your users.
+OneSync is a free alternative aimed at the gap between "I want this UX" and "I can justify a commercial licence." It's the right pick when your org is too small or budget-constrained for a paid product, but the OneDrive sync client is the wrong shape for your users.
 
 ## What OneSync adds on top
 
@@ -39,7 +39,7 @@ Most of these came from running similar tools in production at a single school a
 - **Accurate free-space in File Explorer.** Right-clicking a drive shows the real OneDrive / SharePoint quota and remaining bytes (refreshed periodically via Graph), not a synthetic placeholder. Users actually know when they're about to run out.
 - **Image thumbnail previews.** JPG / PNG / HEIC thumbnails render in Explorer the same way they do on a local disk, without the user having to open the file first.
 - **Live upload / sync status widget.** A floating tray modal shows in-progress uploads, deletes, and conflict resolutions with percentage and filename, so users can tell at a glance whether their save has actually made it to the cloud.
-- **Web Recycle Bin viewer.** Right-click the tray icon → "Recycle Bin" opens an in-app view of the OneDrive / SharePoint recycle bin so users can restore deleted files without leaving the desktop.
+- **Recycle bin access.** The tray's Recycle Bin view shows recently-deleted files from this client for visibility — clicking Restore on anything (recent or older) opens the OneDrive / SharePoint recycle bin in your browser, where the actual restore happens.
 - **Recycle-bin desktop icon stays clean.** The OneDrive Recycle Bin folder is excluded from the delta sync, so the local desktop Recycle Bin icon never flips to the "items present" state because of cloud-side deletes the user doesn't care about.
 - **Cross-machine pending-upload notification.** If a staff member leaves work-in-progress on one PC and signs into another, a tray balloon on the new machine tells them which files are still pending on which device.
 
@@ -65,9 +65,13 @@ Most of these came from running similar tools in production at a single school a
 
 ## Configuration
 
-The installer drops a minimal `config.json` at `C:\Program Files\OneSync\config.json` with placeholder GUIDs. **Edit that file in place** — you only need to fill in `tenantId`, `clientId`, `authority`, and your drive list. Every other setting has a sensible default that doesn't need to appear in your config unless you want to override it.
+**First launch shows a setup wizard.** It asks for Tenant ID, Application (client) ID, and your drives (letter, label, OneDrive vs SharePoint, site URL for SharePoint), then writes the result to `%LOCALAPPDATA%\OneSync\config.json` — no admin rights required. OneSync then continues into normal startup.
 
-Minimum viable config (about 15 lines):
+> **Heads up: shell folder redirection is on by default.** For each OneDrive drive, the wizard sets `folderRedirection: ["Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"]`, which relocates your Windows shell folders onto that drive (so Documents lives at e.g. `H:\Documents`). This matches the "everything goes in OneDrive" pattern most school / small-org deployments want. **If you don't want it**, after first launch edit `%LOCALAPPDATA%\OneSync\config.json`, find the drive entry, and either remove the `folderRedirection` array or set it to `[]`, then restart OneSync.
+
+For advanced settings — folder redirection, sync tuning, exclude patterns, log levels, eviction thresholds — edit `%LOCALAPPDATA%\OneSync\config.json` directly after first launch. Every available setting is documented in the [`config.template.json`](config.template.json) reference. The JSON loader supports `//` comments and trailing commas, so you can copy snippets from the template if you want to override a default.
+
+Minimum viable config (about 15 lines, the shape the wizard produces):
 
 ```json
 {
@@ -80,11 +84,11 @@ Minimum viable config (about 15 lines):
 }
 ```
 
-The 266-line [`config.template.json`](config.template.json) in this repo is a reference doc that documents every available setting with comments — consult it when you want to tune something specific (rate limits, eviction thresholds, exclude patterns, etc.). You don't need to download it or copy it into your real config; the JSON loader supports `//` comments and trailing commas, so you can copy individual snippets from the template if you want to override a default.
-
 The Entra app registration needs delegated permissions: `Files.ReadWrite`, `Sites.ReadWrite.All`, `offline_access`, `User.Read`, and must allow public client flows.
 
 **No client secret required.** OneSync runs as a public client (desktop app) using MSAL's WAM broker — the signed-in Windows user authenticates with their own delegated permissions, so there's no shared application secret to distribute to endpoints, store in config, or rotate. Don't create a client secret on the app registration; OneSync won't use it. Full setup steps in [DEPLOYMENT.md](DEPLOYMENT.md#tenant-prep-checklist).
+
+For IT fleet deployment, drop a tenant-wide config at `%PROGRAMDATA%\OneSync\config.json` — see [DEPLOYMENT.md](DEPLOYMENT.md#pushing-configjson). OneSync prefers that path over the installer's placeholder, so a fresh user on a managed machine never sees the wizard.
 
 ## Security
 
@@ -97,6 +101,9 @@ The Entra app registration needs delegated permissions: `Files.ReadWrite`, `Site
 
 **Do I need to create a client secret in the Entra app registration?**
 No. OneSync is a **public client** (desktop app) using delegated permissions — the signed-in Windows user is the credential. Public clients can't store secrets securely, which is why the protocol doesn't use one. Most apps that talk to Graph from a *server* need a secret because they act as themselves; OneSync runs on the user's PC and acts as the user, which is a different auth pattern. Don't add a secret to the app registration — OneSync won't use it and it's a needless audit liability. Full step-by-step app-registration walkthrough is in [DEPLOYMENT.md](DEPLOYMENT.md#tenant-prep-checklist).
+
+**Does OneSync redirect my Documents / Desktop folders by default?**
+Yes. The setup wizard enables shell folder redirection (`Desktop`, `Documents`, `Downloads`, `Music`, `Pictures`, `Videos`) for OneDrive drives, so those Windows shell folders point at the OneSync drive (e.g. Documents lives at `H:\Documents`). It matches the "everything goes in OneDrive" pattern school deployments coming from a file-server world expect. To opt out, edit `%LOCALAPPDATA%\OneSync\config.json` after first launch — find your OneDrive entry and either remove the `folderRedirection` array or set it to `[]`, then restart OneSync.
 
 **Office AutoSave / co-authoring isn't kicking in for my users — what gives?**
 Co-authoring and AutoSave only engage when an Office document opens via OneSync's file handler (which redirects it to the SharePoint URL). On a fresh Windows profile that's automatic — the installer registers OneSync as the default app for `.docx` / `.xlsx` / `.pptx` machine-wide. But on profiles where Word / Excel / PowerPoint have *already* been opened, Windows has stored a per-user "UserChoice" pointing at Office, and that overrides OneSync's machine-wide registration. (This is anti-hijack protection in Windows 10/11 — apps can't programmatically retarget the default for you.) Fix it once per user: right-click any Word document on a OneSync drive → **Open with** → **Choose another app** → pick **OneSync**, tick **"Always use this app to open .docx files"**, click **OK**. Repeat for an Excel and a PowerPoint file. After that, double-click works as documented and AutoSave engages on every subsequent open.
@@ -132,6 +139,26 @@ Yes, as long as the user's Windows account can reach `graph.microsoft.com` and `
 **How do I update to a newer version?**
 Just run the new `OneSyncSetup.exe` — it does an MSI MajorUpgrade in place. User configuration, hydrated files, and pending uploads survive the upgrade.
 
+## Repository structure
+
+| Path | What's there |
+|---|---|
+| `src/OneSync/` | Main app — .NET 8 (WinForms + WPF), Dokan filesystem layer, Microsoft Graph gateway, setup wizard, tray + widgets |
+| `src/OneSync.ShellOverlay/` | C++ shell extension DLL: drive icon overlays + Explorer image thumbnail provider |
+| `src/OneSync.Installer/` | WiX 6 MSI definition and Burn bootstrapper bundle |
+| `config.template.json` | Annotated reference of every available config setting |
+| `DEPLOYMENT.md` | IT deployment guide (Intune / SCCM / GPO / `%PROGRAMDATA%` config push) |
+
+## Building from source
+
+Requires the .NET 8 SDK and the WiX 6 CLI (`dotnet tool install --global wix --version 6.*`). The C++ ShellOverlay project builds separately (Visual Studio with the C++ workload): build it once and drop the resulting `OneSyncShellOverlay.dll` into `src/OneSync.Installer/stage/`, then run:
+
+```powershell
+.\src\OneSync.Installer\build.ps1
+```
+
+That produces `OneSync.msi` next to the script and the `OneSyncSetup.exe` bundle in `dist/`. The bundle also expects `Dokan_x64.msi` at `dist/Dokan_x64.msi` — grab it from the [Dokan releases page](https://github.com/dokan-dev/dokany/releases) once.
+
 ## License
 
-[Freeware](LICENSE) — free for personal and commercial use, redistribute the unmodified installer, don't resell or repackage. Source code is not provided.
+[MIT](LICENSE) — free to use, modify, and redistribute, including commercially. Keep the copyright notice. Source is in this repo; pull requests welcome.
