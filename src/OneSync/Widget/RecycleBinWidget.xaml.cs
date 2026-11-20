@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
@@ -39,7 +39,7 @@ public partial class RecycleBinWidget : Window
     {
         PositionBottomRight();
         ApplyWindowStyles();
-        AcrylicHelper.Apply(new WindowInteropHelper(this).Handle);
+        WidgetTheme.Attach(this, WindowBg);
     }
 
     private void ApplyWindowStyles()

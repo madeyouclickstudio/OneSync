@@ -37,20 +37,20 @@ internal static class AcrylicHelper
     private const int WCA_ACCENT_POLICY = 19;
     private const int ACCENT_ENABLE_ACRYLICBLURBEHIND = 4;
 
-    public static void Apply(IntPtr hwnd)
+    public static void Apply(IntPtr hwnd, bool dark = true)
     {
-        if (TryWin11Backdrop(hwnd))
+        if (TryWin11Backdrop(hwnd, dark))
             return;
 
-        TryWin10Acrylic(hwnd);
+        TryWin10Acrylic(hwnd, dark);
     }
 
-    private static bool TryWin11Backdrop(IntPtr hwnd)
+    private static bool TryWin11Backdrop(IntPtr hwnd, bool dark)
     {
         try
         {
-            int dark = 1;
-            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+            int darkMode = dark ? 1 : 0;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int));
 
             int round = DWMWCP_ROUND;
             DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
@@ -65,14 +65,14 @@ internal static class AcrylicHelper
         }
     }
 
-    private static void TryWin10Acrylic(IntPtr hwnd)
+    private static void TryWin10Acrylic(IntPtr hwnd, bool dark)
     {
         try
         {
             var accent = new AccentPolicy
             {
                 AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND,
-                GradientColor = 0xCC1A1A1A,
+                GradientColor = dark ? 0xCC1A1A1Au : 0xCCF3F3F3u,
             };
 
             var data = new WindowCompositionAttribData

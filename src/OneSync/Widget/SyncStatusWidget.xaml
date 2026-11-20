@@ -18,7 +18,7 @@
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
 
-        <!-- Windows 11 dark flyout palette -->
+        <!-- Dark palette. WidgetTheme swaps these for the light one when Windows is in light mode -->
         <SolidColorBrush x:Key="PrimaryText" Color="#FFFFFF"/>
         <SolidColorBrush x:Key="SecondaryText" Color="#C5FFFFFF"/>
         <SolidColorBrush x:Key="TertiaryText" Color="#8BFFFFFF"/>
@@ -30,6 +30,7 @@
         <SolidColorBrush x:Key="ProgressBrush" Color="#FFC83D"/>
         <SolidColorBrush x:Key="CriticalBrush" Color="#FF99A4"/>
         <SolidColorBrush x:Key="CriticalFill" Color="#1FFF99A4"/>
+        <SolidColorBrush x:Key="SuccessBrush" Color="#6CCB5F"/>
 
         <FontFamily x:Key="TextFont">Segoe UI Variable Text, Segoe UI</FontFamily>
         <FontFamily x:Key="IconFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
@@ -45,19 +46,19 @@
         <Style x:Key="Body" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="{StaticResource TextFont}"/>
             <Setter Property="FontSize" Value="13"/>
-            <Setter Property="Foreground" Value="{StaticResource PrimaryText}"/>
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryText}"/>
             <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         </Style>
 
         <Style x:Key="Caption" TargetType="TextBlock" BasedOn="{StaticResource Body}">
             <Setter Property="FontSize" Value="12"/>
-            <Setter Property="Foreground" Value="{StaticResource SecondaryText}"/>
+            <Setter Property="Foreground" Value="{DynamicResource SecondaryText}"/>
             <Setter Property="Typography.NumeralAlignment" Value="Tabular"/>
         </Style>
 
         <!-- Quiet text button, like the ones in Windows' own flyouts -->
         <Style x:Key="SubtleBtn" TargetType="Button">
-            <Setter Property="Foreground" Value="{StaticResource PrimaryText}"/>
+            <Setter Property="Foreground" Value="{DynamicResource PrimaryText}"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Setter Property="FontFamily" Value="{StaticResource TextFont}"/>
@@ -75,14 +76,14 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource SubtleFill}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFill}"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource SubtleFillPressed}"/>
-                                <Setter Property="Foreground" Value="{StaticResource SecondaryText}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillPressed}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource SecondaryText}"/>
                             </Trigger>
                             <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource PrimaryText}"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource PrimaryText}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -91,15 +92,15 @@
         </Style>
 
         <Style x:Key="OutlineBtn" TargetType="Button" BasedOn="{StaticResource SubtleBtn}">
-            <Setter Property="Background" Value="{StaticResource SubtleFill}"/>
-            <Setter Property="BorderBrush" Value="{StaticResource Stroke}"/>
+            <Setter Property="Background" Value="{DynamicResource SubtleFill}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Stroke}"/>
             <Setter Property="Padding" Value="10,6"/>
         </Style>
 
         <Style x:Key="IconBtn" TargetType="Button" BasedOn="{StaticResource SubtleBtn}">
             <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
             <Setter Property="FontSize" Value="10"/>
-            <Setter Property="Foreground" Value="{StaticResource SecondaryText}"/>
+            <Setter Property="Foreground" Value="{DynamicResource SecondaryText}"/>
             <Setter Property="Padding" Value="0"/>
             <Setter Property="Width" Value="24"/>
             <Setter Property="Height" Value="24"/>
@@ -203,7 +204,7 @@
         </ControlTemplate>
     </Window.Resources>
 
-    <Border CornerRadius="8" BorderThickness="1" BorderBrush="{StaticResource Stroke}">
+    <Border CornerRadius="8" BorderThickness="1" BorderBrush="{DynamicResource Stroke}">
         <Border.Background>
             <SolidColorBrush x:Name="WindowBg" Color="#D9202020"/>
         </Border.Background>
@@ -214,7 +215,7 @@
             <ItemsControl ItemsSource="{Binding Toasts}" Style="{StaticResource HideWhenEmpty}" Margin="0,0,0,12">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Border Background="{StaticResource SubtleFill}" BorderBrush="{StaticResource Divider}"
+                        <Border Background="{DynamicResource SubtleFill}" BorderBrush="{DynamicResource Divider}"
                                 BorderThickness="1" CornerRadius="6" Padding="10,8,4,8" Margin="0,0,0,6">
                             <Grid>
                                 <Grid.ColumnDefinitions>
@@ -223,7 +224,7 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="&#xE946;" Style="{StaticResource Icon}"
-                                           Foreground="{StaticResource SecondaryText}"
+                                           Foreground="{DynamicResource SecondaryText}"
                                            VerticalAlignment="Top" Margin="0,2,10,0"/>
                                 <TextBlock Grid.Column="1" Text="{Binding Message}" Style="{StaticResource Body}"
                                            FontSize="12" TextWrapping="Wrap" TextTrimming="None"
@@ -277,6 +278,17 @@
                     <DataTemplate>
                         <Border x:Name="FileRow" CornerRadius="4" Padding="8,6" Background="Transparent"
                                 Cursor="Hand">
+                            <!-- New rows fade in rather than popping in -->
+                            <Border.Triggers>
+                                <EventTrigger RoutedEvent="Loaded">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                             From="0" To="1" Duration="0:0:0.15"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </Border.Triggers>
                             <Border.InputBindings>
                                 <MouseBinding MouseAction="LeftClick" Command="{Binding OpenCommand}"/>
                             </Border.InputBindings>
@@ -286,7 +298,7 @@
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock x:Name="RowIcon" Text="{Binding Glyph}" Style="{StaticResource Icon}"
-                                           Foreground="{StaticResource SecondaryText}" Margin="0,0,10,0"/>
+                                           Foreground="{DynamicResource SecondaryText}" Margin="0,0,10,0"/>
                                 <StackPanel Grid.Column="1">
                                     <Grid HorizontalAlignment="Left" ToolTip="{Binding FullPath}">
                                         <Grid.ColumnDefinitions>
@@ -300,7 +312,7 @@
                                                Margin="0,1,0,0"/>
                                     <Grid Height="2" Margin="0,6,0,1"
                                           Visibility="{Binding ShowProgress, Converter={StaticResource BoolToVis}}">
-                                        <Border Background="{StaticResource TrackBrush}" CornerRadius="1"/>
+                                        <Border Background="{DynamicResource TrackBrush}" CornerRadius="1"/>
                                         <Border Background="{DynamicResource ProgressBrush}" CornerRadius="1"
                                                 RenderTransformOrigin="0,0.5">
                                             <Border.RenderTransform>
@@ -313,7 +325,7 @@
                         </Border>
                         <DataTemplate.Triggers>
                             <DataTrigger Binding="{Binding State}" Value="Completed">
-                                <Setter TargetName="RowIcon" Property="Foreground" Value="#6CCB5F"/>
+                                <Setter TargetName="RowIcon" Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
                                 <DataTrigger.EnterActions>
                                     <BeginStoryboard>
                                         <Storyboard>
@@ -329,7 +341,7 @@
                                 </DataTrigger.EnterActions>
                             </DataTrigger>
                             <Trigger SourceName="FileRow" Property="IsMouseOver" Value="True">
-                                <Setter TargetName="FileRow" Property="Background" Value="{StaticResource SubtleFill}"/>
+                                <Setter TargetName="FileRow" Property="Background" Value="{DynamicResource SubtleFill}"/>
                             </Trigger>
                         </DataTemplate.Triggers>
                     </DataTemplate>
@@ -353,7 +365,7 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="&#xE783;" Style="{StaticResource Icon}"
-                                           Foreground="{StaticResource CriticalBrush}" Margin="0,0,10,0"/>
+                                           Foreground="{DynamicResource CriticalBrush}" Margin="0,0,10,0"/>
                                 <StackPanel Grid.Column="1">
                                     <Grid HorizontalAlignment="Left" ToolTip="{Binding FullPath}">
                                         <Grid.ColumnDefinitions>
@@ -375,7 +387,7 @@
                         </Border>
                         <DataTemplate.Triggers>
                             <Trigger SourceName="ErrRow" Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ErrRow" Property="Background" Value="{StaticResource SubtleFill}"/>
+                                <Setter TargetName="ErrRow" Property="Background" Value="{DynamicResource SubtleFill}"/>
                             </Trigger>
                         </DataTemplate.Triggers>
                     </DataTemplate>

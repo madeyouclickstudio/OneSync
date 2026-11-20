@@ -49,8 +49,7 @@ public partial class SyncStatusWidget : Window
     {
         PositionBottomRight();
         ApplyWindowStyles();
-        AcrylicHelper.Apply(new WindowInteropHelper(this).Handle);
-        UpdateAccentColor();
+        WidgetTheme.Attach(this, WindowBg, UpdateAccentColor);
         UpdateSpin();
     }
 
@@ -85,7 +84,7 @@ public partial class SyncStatusWidget : Window
     {
         try
         {
-            var color = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_vm.AccentHex);
+            var color = WidgetTheme.Accent(_vm.AccentHex);
             HeaderIconText.Foreground = new SolidColorBrush(color);
             // Progress bars follow the header, so they're the accent while syncing.
             Resources["ProgressBrush"] = new SolidColorBrush(color);
