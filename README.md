@@ -15,7 +15,7 @@ OneSync mounts OneDrive and SharePoint libraries as native Windows drive letters
 
 Latest installer: see the [Releases page](../../releases). Three files are published with each release:
 
-- **`OneSyncSetup.exe`** — most users start here. One-shot bundle that brings the .NET 8 runtime, Dokan 2.x driver, and OneSync MSI.
+- **`OneSyncSetup.exe`** — most users start here. One-shot bundle that brings the Dokan 2.x driver and the OneSync MSI (the .NET 10 runtime is built into OneSync.exe).
 - **`OneSync.msi`** — for IT admins deploying via Intune / GPO / SCCM as a raw MSI. Install `Dokan_x64.msi` first.
 - **`Dokan_x64.msi`** — the Dokan user-mode filesystem driver. Required dependency for the standalone MSI; included in the bundle.
 
@@ -143,7 +143,7 @@ Just run the new `OneSyncSetup.exe` — it does an MSI MajorUpgrade in place. Us
 
 | Path | What's there |
 |---|---|
-| `src/OneSync/` | Main app — .NET 8 (WinForms + WPF), Dokan filesystem layer, Microsoft Graph gateway, setup wizard, tray + widgets |
+| `src/OneSync/` | Main app — .NET 10 (WinForms + WPF), Dokan filesystem layer, Microsoft Graph gateway, setup wizard, tray + widgets |
 | `src/OneSync.ShellOverlay/` | C++ shell extension DLL: drive icon overlays + Explorer image thumbnail provider |
 | `src/OneSync.Installer/` | WiX 6 MSI definition and Burn bootstrapper bundle |
 | `config.template.json` | Annotated reference of every available config setting |
@@ -151,7 +151,7 @@ Just run the new `OneSyncSetup.exe` — it does an MSI MajorUpgrade in place. Us
 
 ## Building from source
 
-Requires the .NET 8 SDK and the WiX 6 CLI (`dotnet tool install --global wix --version 6.*`). The C++ ShellOverlay project builds separately (Visual Studio with the C++ workload): build it once and drop the resulting `OneSyncShellOverlay.dll` into `src/OneSync.Installer/stage/`, then run:
+Requires the .NET 10 SDK and the WiX 6 CLI (`dotnet tool install --global wix --version 6.*`). The C++ ShellOverlay project builds separately (Visual Studio with the C++ workload): build it once and drop the resulting `OneSyncShellOverlay.dll` into `src/OneSync.Installer/stage/`, then run:
 
 ```powershell
 .\src\OneSync.Installer\build.ps1
