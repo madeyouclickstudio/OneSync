@@ -60,7 +60,7 @@ internal sealed class MetadataStore : IDisposable
         // One-time cleanup of orphan records from versions 1.0.15 and 1.0.16,
         // which wrote FolderEnumerationState without [BsonId] on the Key
         // property. Those records have ObjectId _id values (not the composite
-        // string key), so FindById never finds them — they're inert junk that
+        // string key), so FindById never finds them - they're inert junk that
         // wastes disk space until the 30-day TTL above sweeps them. Delete any
         // record whose serialized DriveConfigId is empty (the auto-id'd records
         // round-trip with the Key field stored but never populated correctly).
@@ -92,7 +92,7 @@ internal sealed class MetadataStore : IDisposable
 
     /// <summary>Direct children of a folder. For non-root paths, uses ParentRemoteItemId
     /// (indexed lookup, fast). For the root path "/", the parent isn't in metadata as
-    /// a row — falls back to a client-side filter on RelativePath shape (a direct child
+    /// a row - falls back to a client-side filter on RelativePath shape (a direct child
     /// of root has exactly one "/", at position 0).
     ///
     /// Used by HydrationService.EnumerateFolderIfEmpty to self-heal partial folders:
@@ -156,7 +156,7 @@ internal sealed class MetadataStore : IDisposable
 
     /// <summary>Records that a hydrated file has just been truncated back to a
     /// placeholder by the LRU eviction service. The metadata row stays; only
-    /// the Hydrated flag flips. The cloud copy is UNTOUCHED — this method
+    /// the Hydrated flag flips. The cloud copy is UNTOUCHED - this method
     /// performs zero remote operations.</summary>
     public void MarkDehydrated(string driveConfigId, string relativePath)
     {

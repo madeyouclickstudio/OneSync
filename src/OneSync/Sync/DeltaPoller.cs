@@ -38,7 +38,7 @@ internal sealed class DeltaPoller : IAsyncDisposable
 
     /// <summary>
     /// Optional predicate set by CooperativePollingService. When non-null and
-    /// returns true for a drive, the background poll loop skips it — that drive's
+    /// returns true for a drive, the background poll loop skips it - that drive's
     /// catch-up runs through the reader's cache pull + hourly self-check instead.
     /// Self-check still calls <see cref="PollDriveAsync"/> directly, bypassing this.
     /// </summary>
@@ -194,7 +194,7 @@ internal sealed class DeltaPoller : IAsyncDisposable
                 if (!resp.IsSuccessStatusCode)
                 {
                     var body = await resp.Content.ReadAsStringAsync(ct);
-                    _logger.Warning("Delta {Status} for {Letter}: — saved checkpoint, will resume next cycle. {Body}",
+                    _logger.Warning("Delta {Status} for {Letter}: - saved checkpoint, will resume next cycle. {Body}",
                         (int)resp.StatusCode, drive.Letter, Truncate(body, 300));
                     return;
                 }
@@ -328,22 +328,8 @@ internal sealed class DeltaPoller : IAsyncDisposable
 
     private static string BuildInitialDeltaUrl(DriveConfig drive)
     {
-        // ?token=latest tells Graph "skip the full enumeration, just give me the
-        // current state token". The response is ~50 bytes (no items, just the
-        // @odata.deltaLink). Subsequent polls use the saved token and return only
-        // changes since.
-        //
-        // Effect: a fresh install of a 460k-item library hits Graph ONCE on
-        // startup instead of ~2,300 times (one per /delta page). Metadata is
-        // built lazily as the user navigates folders (HydrationService's
-        // lazy-fallback fires on first browse, fetches /children for that folder
-        // only). Aligns with the "only fetch what the user asks for" design.
-        //
-        // Trade-off: items the user never visits never enter metadata. That's
-        // fine — they'd never be hydrated either, and delta tracking catches
-        // changes to whatever IS in metadata. Items added remotely to unvisited
-        // folders appear when the user eventually visits that folder via
-        // lazy-fallback.
+        // Start from the current state rather than enumerating the whole library;
+        // folders are listed when they're first opened.
         if (drive.IsOneDrive)
             return "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=latest";
         return $"https://graph.microsoft.com/v1.0/drives/{drive.ResolvedDriveId}/root/delta?token=latest";

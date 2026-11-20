@@ -56,7 +56,7 @@ internal sealed class RecycleBinService
         if (string.IsNullOrEmpty(item.RemoteItemId))
             return (false, "No remote item ID");
 
-        // Cancel any pending RemoteDelete — if it hasn't been sent yet,
+        // Cancel any pending RemoteDelete - if it hasn't been sent yet,
         // the file still exists on the server and we just re-download it.
         int cancelled = _queue.RemoveStaleOperations(op =>
             op.Type == SyncOpType.RemoteDelete &&

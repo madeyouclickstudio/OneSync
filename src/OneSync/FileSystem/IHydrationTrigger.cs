@@ -27,6 +27,6 @@ internal interface IHydrationTrigger
 
     /// <summary>Records that a file was just opened/accessed locally. Updates
     /// LastAccessedAt in MetadataStore so the LRU eviction service knows the
-    /// file is in active use. Cheap — single LiteDB update.</summary>
+    /// file is in active use. Cheap - single LiteDB update.</summary>
     void NotifyAccessed(DriveConfig drive, string relativePath);
 }

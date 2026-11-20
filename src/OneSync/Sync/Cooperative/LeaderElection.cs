@@ -65,8 +65,8 @@ internal sealed class LeaderElection
     public LeaderRole Role { get; private set; } = LeaderRole.NotParticipating;
 
     /// <summary>
-    /// Top-level folders this client saw during its read probe — keyed by
-    /// folder ID, valued by name — excluding the control folder. Used by the
+    /// Top-level folders this client saw during its read probe - keyed by
+    /// folder ID, valued by name - excluding the control folder. Used by the
     /// reader path to detect permission divergence: if a reader can see folders
     /// that aren't represented in the leader's cache (an HR user with access to
     /// a folder a non-HR leader can't see, etc.), the reader fires a targeted
@@ -112,12 +112,12 @@ internal sealed class LeaderElection
     {
         if (!_coopConfig.Enabled)
         {
-            _logger.Information("Cooperative polling disabled in config — staying with per-user delta polling");
+            _logger.Information("Cooperative polling disabled in config - staying with per-user delta polling");
             Role = LeaderRole.NotParticipating;
             return;
         }
 
-        // 1) Read probe — confirms we can see everything at the top level.
+        // 1) Read probe - confirms we can see everything at the top level.
         // A leader with subset visibility writes a subset cache; readers with broader
         // visibility would be missing items. Decline candidacy if subset-visible;
         // the hourly self-check still catches anything for users like that.
@@ -126,18 +126,18 @@ internal sealed class LeaderElection
         {
             Role = LeaderRole.NotParticipating;
             _logger.Information(
-                "Read probe failed — operating on own delta polls until someone eligible claims leadership");
+                "Read probe failed - operating on own delta polls until someone eligible claims leadership");
             return;
         }
 
-        // 2) Write probe — try to create the control folder.
+        // 2) Write probe - try to create the control folder.
         //
         // Cooperative polling is *opt-in by write capability*. A read-only user
         // becoming a Reader of someone else's cache would inherit the leader's
         // view of the library, but read-only and read/write users in the same
         // library do not necessarily see the same content (staff-only subfolders
         // a student leader can't see, etc.). So we restrict the Reader role to
-        // clients who could themselves have been leader — guaranteeing the
+        // clients who could themselves have been leader - guaranteeing the
         // cohort all shares the same permission profile.
         //
         // 201 (created) and 409 (already exists) both confirm write access at the
@@ -147,7 +147,7 @@ internal sealed class LeaderElection
         {
             Role = LeaderRole.NotParticipating;
             _logger.Information(
-                "Read-only at library root — running per-user delta poll for this drive (cooperative polling is opt-in by write capability so readers and the leader share the same permission profile)");
+                "Read-only at library root - running per-user delta poll for this drive (cooperative polling is opt-in by write capability so readers and the leader share the same permission profile)");
             return;
         }
 
@@ -168,7 +168,7 @@ internal sealed class LeaderElection
         var existing = await ReadLockAsync(ct);
         if (existing is null)
         {
-            // Lock doesn't exist (deleted between our create attempt and our read) — retry once.
+            // Lock doesn't exist (deleted between our create attempt and our read) - retry once.
             (claimed, etag) = await TryCreateLockAsync(ct);
             if (claimed)
             {
@@ -178,11 +178,11 @@ internal sealed class LeaderElection
                 _logger.Information("Acquired leader role on retry (lease until {Expires:HH:mm:ss} UTC)", _lockExpiresAtUtc);
                 return;
             }
-            // Still couldn't claim — fall through to reader.
+            // Still couldn't claim - fall through to reader.
             existing = await ReadLockAsync(ct);
             if (existing is null)
             {
-                _logger.Warning("Could not claim or read lock — operating in per-user fallback");
+                _logger.Warning("Could not claim or read lock - operating in per-user fallback");
                 Role = LeaderRole.NotParticipating;
                 return;
             }
@@ -244,7 +244,7 @@ internal sealed class LeaderElection
 
         if (resp.StatusCode == HttpStatusCode.PreconditionFailed)
         {
-            _logger.Warning("Lock renewal rejected (412) — another client overwrote our lock; demoting to reader");
+            _logger.Warning("Lock renewal rejected (412) - another client overwrote our lock; demoting to reader");
             Role = LeaderRole.Reader;
             _lockEtag = null;
             return false;
@@ -259,7 +259,7 @@ internal sealed class LeaderElection
         if (elapsedSinceLastSuccess > halfLease)
         {
             _logger.Warning(
-                "Lock renewal returned {Status} and {Elapsed} have passed since last successful renew (≥ half-lease {Half}) — demoting defensively",
+                "Lock renewal returned {Status} and {Elapsed} have passed since last successful renew (≥ half-lease {Half}) - demoting defensively",
                 (int)resp.StatusCode, elapsedSinceLastSuccess, halfLease);
             Role = LeaderRole.NotParticipating;
             _lockEtag = null;
@@ -267,7 +267,7 @@ internal sealed class LeaderElection
         }
 
         _logger.Warning(
-            "Lock renewal returned {Status} — still inside safe window ({Elapsed} < half-lease), retrying next cycle",
+            "Lock renewal returned {Status} - still inside safe window ({Elapsed} < half-lease), retrying next cycle",
             (int)resp.StatusCode, elapsedSinceLastSuccess);
         return true;
     }
@@ -294,11 +294,11 @@ internal sealed class LeaderElection
             if (resp.IsSuccessStatusCode || resp.StatusCode == HttpStatusCode.NotFound)
                 _logger.Information("Released leader lock");
             else
-                _logger.Warning("Lock release returned {Status} — relying on expiry", (int)resp.StatusCode);
+                _logger.Warning("Lock release returned {Status} - relying on expiry", (int)resp.StatusCode);
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Lock release failed — relying on expiry");
+            _logger.Warning(ex, "Lock release failed - relying on expiry");
         }
         finally
         {
@@ -320,7 +320,7 @@ internal sealed class LeaderElection
     /// </summary>
     private async Task<bool> ProbeTopLevelAccessAsync(CancellationToken ct)
     {
-        // Collect probe targets across ALL pages — a library with 201+ top-level
+        // Collect probe targets across ALL pages - a library with 201+ top-level
         // folders would otherwise silently miss the rest, possibly declaring an
         // ineligible (permission-limited) user as eligible because only the
         // accessible first 200 were tested.
@@ -337,12 +337,12 @@ internal sealed class LeaderElection
                 () => new HttpRequestMessage(HttpMethod.Get, thisPageUrl), ct);
             if (resp.StatusCode == HttpStatusCode.Forbidden)
             {
-                _logger.Information("Permission probe: root listing returned 403 — not eligible for leadership");
+                _logger.Information("Permission probe: root listing returned 403 - not eligible for leadership");
                 return false;
             }
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.Warning("Permission probe: root listing returned {Status} — declining leadership conservatively",
+                _logger.Warning("Permission probe: root listing returned {Status} - declining leadership conservatively",
                     (int)resp.StatusCode);
                 return false;
             }
@@ -351,7 +351,7 @@ internal sealed class LeaderElection
             using var doc = JsonDocument.Parse(pageJson);
             if (!doc.RootElement.TryGetProperty("value", out var values))
             {
-                _logger.Warning("Permission probe: root listing missing 'value' array — declining leadership");
+                _logger.Warning("Permission probe: root listing missing 'value' array - declining leadership");
                 return false;
             }
 
@@ -375,7 +375,7 @@ internal sealed class LeaderElection
 
         if (folders.Count == 0)
         {
-            _logger.Information("Permission probe: no top-level folders to probe (root has {Total} items) — eligible",
+            _logger.Information("Permission probe: no top-level folders to probe (root has {Total} items) - eligible",
                 totalChildren);
             return true;
         }
@@ -409,7 +409,7 @@ internal sealed class LeaderElection
                     probeCts.Cancel();
                 }
             }
-            catch (OperationCanceledException) { /* fine — sibling failed */ }
+            catch (OperationCanceledException) { /* fine - sibling failed */ }
             finally { gate.Release(); }
         }).ToArray();
 
@@ -420,19 +420,19 @@ internal sealed class LeaderElection
         {
             if (failureStatus == 403)
             {
-                _logger.Information("Permission probe: 403 on top-level folder '{Folder}' — not eligible for leadership",
+                _logger.Information("Permission probe: 403 on top-level folder '{Folder}' - not eligible for leadership",
                     failureFolder);
             }
             else
             {
-                _logger.Warning("Permission probe: {Status} on top-level folder '{Folder}' — declining leadership",
+                _logger.Warning("Permission probe: {Status} on top-level folder '{Folder}' - declining leadership",
                     failureStatus, failureFolder);
             }
             return false;
         }
 
         _logger.Information(
-            "Permission probe: root has {Total} items ({Folders} folders); probed {Probed}/{Target} top-level subfolders in parallel without 403 — eligible",
+            "Permission probe: root has {Total} items ({Folders} folders); probed {Probed}/{Target} top-level subfolders in parallel without 403 - eligible",
             totalChildren, folders.Count, probed, folders.Count);
         return true;
     }
@@ -440,7 +440,7 @@ internal sealed class LeaderElection
     /// <summary>
     /// Probe write access by trying to create the control folder. 201 = created,
     /// 409 = already exists, both confirm write at library root. 403 = read-only.
-    /// Idempotent: replaces the old EnsureControlFolderAsync — when this returns
+    /// Idempotent: replaces the old EnsureControlFolderAsync - when this returns
     /// true the folder is guaranteed to exist.
     /// </summary>
     private async Task<bool> ProbeWriteAccessAsync(CancellationToken ct)
@@ -459,7 +459,7 @@ internal sealed class LeaderElection
 
         if (resp.StatusCode == HttpStatusCode.Created)
         {
-            _logger.Information("Write probe: created control folder '/{Folder}/' — leader-eligible", _controlFolder);
+            _logger.Information("Write probe: created control folder '/{Folder}/' - leader-eligible", _controlFolder);
             return true;
         }
         if (resp.StatusCode == HttpStatusCode.Conflict)
@@ -467,19 +467,19 @@ internal sealed class LeaderElection
             // 409 means the folder is there. We have write at root because conflictBehavior=fail
             // means MSI would have 403'd if we lacked permission to attempt the create.
             // (Note: SharePoint can also 403 on the path differently. We'll catch that on lock create.)
-            _logger.Debug("Write probe: control folder '/{Folder}/' already exists (409) — leader-eligible", _controlFolder);
+            _logger.Debug("Write probe: control folder '/{Folder}/' already exists (409) - leader-eligible", _controlFolder);
             return true;
         }
         if (resp.StatusCode == HttpStatusCode.Forbidden)
         {
             _logger.Information(
-                "Write probe: 403 creating control folder '/{Folder}/' — this client is read-only at library root, will operate as reader if a leader exists",
+                "Write probe: 403 creating control folder '/{Folder}/' - this client is read-only at library root, will operate as reader if a leader exists",
                 _controlFolder);
             return false;
         }
 
         _logger.Warning(
-            "Write probe: unexpected status {Status} creating control folder '/{Folder}/' — declining leadership defensively",
+            "Write probe: unexpected status {Status} creating control folder '/{Folder}/' - declining leadership defensively",
             (int)resp.StatusCode, _controlFolder);
         return false;
     }
@@ -539,7 +539,7 @@ internal sealed class LeaderElection
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Lock body failed to parse — treating as absent");
+            _logger.Warning(ex, "Lock body failed to parse - treating as absent");
             return null;
         }
     }

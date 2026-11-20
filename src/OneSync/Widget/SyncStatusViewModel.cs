@@ -120,7 +120,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             {
                 if (DriveStatuses[i].StartsWith($"{drive.Letter}:"))
                 {
-                    DriveStatuses[i] = $"{drive.Letter}: {drive.Label} — {count:N0} items";
+                    DriveStatuses[i] = $"{drive.Letter}: {drive.Label} - {count:N0} items";
                     break;
                 }
             }
@@ -291,7 +291,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             var originalName = System.IO.Path.GetFileName(
                 info.OriginalRelativePath.Replace('/', System.IO.Path.DirectorySeparatorChar));
             var conflictName = System.IO.Path.GetFileName(info.ConflictLocalPath);
-            AddToast($"Conflict: {originalName} — saved as {conflictName}", persistent: false);
+            AddToast($"Conflict: {originalName} - saved as {conflictName}", persistent: false);
         });
     }
 
@@ -303,7 +303,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             string when = delay >= TimeSpan.FromMinutes(1)
                 ? $"~{Math.Ceiling(delay.TotalMinutes):F0}m"
                 : $"~{(int)delay.TotalSeconds}s";
-            _throttleMessage = $"Sync paused — resuming in {when}";
+            _throttleMessage = $"Sync paused - resuming in {when}";
             UpdateState();
 
             var timer = new DispatcherTimer { Interval = delay };

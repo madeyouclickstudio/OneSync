@@ -58,10 +58,10 @@ internal static class ConfigLoader
         var errors = new List<string>();
 
         if (!IsConfiguredGuid(config.TenantId))
-            errors.Add("tenantId is not set — replace the placeholder in config.json with your Entra ID tenant GUID (Entra admin centre → Overview → Tenant ID)");
+            errors.Add("tenantId is not set - replace the placeholder in config.json with your Entra ID tenant GUID (Entra admin centre -> Overview -> Tenant ID)");
 
         if (!IsConfiguredGuid(config.ClientId))
-            errors.Add("clientId is not set — replace the placeholder in config.json with the Application (client) ID of your Entra app registration");
+            errors.Add("clientId is not set - replace the placeholder in config.json with the Application (client) ID of your Entra app registration");
 
         if (string.IsNullOrWhiteSpace(config.Authority))
             config.Authority = $"https://login.microsoftonline.com/{config.TenantId}";
@@ -131,7 +131,7 @@ internal static class ConfigLoader
     /// <summary>
     /// Returns the first existing config.json path from the default search list,
     /// or null if none exist. Unlike LoadFromDefaultLocations, this never throws
-    /// and never validates the contents — it's a path lookup only. Used by the
+    /// and never validates the contents - it's a path lookup only. Used by the
     /// first-run setup wizard to find a template to substitute values into.
     /// </summary>
     public static string? FindAnyConfigPath()
@@ -155,12 +155,12 @@ internal static class ConfigLoader
 
     private static IEnumerable<string> DefaultPaths()
     {
-        // Per-user override — writable without admin rights, where the
+        // Per-user override - writable without admin rights, where the
         // first-run setup wizard saves its output. Users can customise here
         // and their choices win over machine-wide and installer defaults.
         yield return PathUtil.Expand(@"%LOCALAPPDATA%\OneSync\config.json");
 
-        // Machine-wide override — the path IT pushes a tenant config to via
+        // Machine-wide override - the path IT pushes a tenant config to via
         // GPO / Intune / SCCM. Beats the installer's placeholder so a fresh
         // user on a managed machine never sees the setup wizard.
         yield return PathUtil.Expand(@"%PROGRAMDATA%\OneSync\config.json");

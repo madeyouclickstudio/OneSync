@@ -11,7 +11,7 @@ namespace OneSync.Util;
 /// Flushed into the structured cooldown_applied log event in GraphHttpClient.
 ///
 /// Lock-free throughout. Record is the hot path and uses Interlocked.Increment
-/// for the slot index. Queries iterate the buffer without locking — under
+/// for the slot index. Queries iterate the buffer without locking - under
 /// concurrent Record they may see best-effort/stale entries. Acceptable
 /// because queries are rare (one per cooldown event) and the use case is
 /// forensic logging, not transactional correctness.
@@ -75,7 +75,7 @@ internal sealed class GraphRequestRingBuffer
 
     /// <summary>
     /// Bucket per-item URLs so "{driveId}/items/{itemId}/content" entries
-    /// aggregate into a single bucket — otherwise the top-K is uninformative
+    /// aggregate into a single bucket - otherwise the top-K is uninformative
     /// noise of unique URLs.
     /// </summary>
     private static string BucketUrl(string url)

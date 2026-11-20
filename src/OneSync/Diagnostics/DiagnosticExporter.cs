@@ -18,7 +18,7 @@ namespace OneSync.Diagnostics;
 /// is written to the user's Desktop (falls back to %TEMP%).
 ///
 /// Privacy: tenant IDs, client IDs, and OAuth tokens are NEVER included. File
-/// CONTENTS are NEVER included — only file paths and pending-sync state. The
+/// CONTENTS are NEVER included - only file paths and pending-sync state. The
 /// user can inspect the zip before sending it.
 /// </summary>
 internal sealed class DiagnosticExporter

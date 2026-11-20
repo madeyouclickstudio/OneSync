@@ -11,10 +11,10 @@ namespace OneSync.Diagnostics;
 /// seconds of an unhandled exception, so this method:
 ///   - is synchronous (no async/await)
 ///   - pre-builds the path
-///   - swallows any internal failure (inner try/catch) — a crash-writer crash
+///   - swallows any internal failure (inner try/catch) - a crash-writer crash
 ///     would be undignified
 ///
-/// File picked up by DiagnosticExporter, but useful even on its own —
+/// File picked up by DiagnosticExporter, but useful even on its own:
 /// post-crash IT can find C:\Users\...\AppData\Local\OneSync\Crashes\*.txt.
 /// </summary>
 internal static class CrashWriter

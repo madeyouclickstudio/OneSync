@@ -108,7 +108,7 @@ internal sealed class CooperativePollingService : IAsyncDisposable
                 }
                 else
                 {
-                    // Write a fresh delta cache from the leader's local metadata view —
+                    // Write a fresh delta cache from the leader's local metadata view:
                     // but only if the content has changed since last write, and only the
                     // sliding window of recent files (plus all folders for navigation).
                     var items = dc.SyncEngine.Metadata.GetForDrive(dc.Drive.ConfigId);
@@ -122,12 +122,12 @@ internal sealed class CooperativePollingService : IAsyncDisposable
             else
             {
                 // RenewAsync demoted us (412 or stale-renewal threshold). Fall
-                // through to the post-leader path below — without this, the
+                // through to the post-leader path below - without this, the
                 // demoted machine would sit blind until the next tick (up to
                 // RenewIntervalSeconds, default 5 min). This recovers in the
                 // same tick instead.
                 _logger.Information(
-                    "Lost leadership for {Letter}: — falling through to {Role} path this cycle to avoid blind window",
+                    "Lost leadership for {Letter}: - falling through to {Role} path this cycle to avoid blind window",
                     dc.Drive.Letter, dc.Election.Role);
             }
         }
@@ -212,7 +212,7 @@ internal sealed class CooperativePollingService : IAsyncDisposable
         var readerFolders = dc.Election.KnownTopLevelFolders;
         if (readerFolders.Count == 0)
         {
-            _logger.Debug("No top-level folders from probe for {Letter}: — skipping divergence check", dc.Drive.Letter);
+            _logger.Debug("No top-level folders from probe for {Letter}: - skipping divergence check", dc.Drive.Letter);
             return;
         }
 
@@ -238,17 +238,17 @@ internal sealed class CooperativePollingService : IAsyncDisposable
         if (extras.Count == 0)
         {
             _logger.Debug(
-                "Reader's top-level view matches leader's cache for {Letter}: ({Count} folders) — no divergence",
+                "Reader's top-level view matches leader's cache for {Letter}: ({Count} folders) - no divergence",
                 dc.Drive.Letter, readerFolders.Count);
             return;
         }
 
         _logger.Information(
-            "Reader has {Extras} top-level folder(s) not in leader's cache for {Letter}: — enumerating just those folders (reader sees {Reader}, cache sees {Cache})",
+            "Reader has {Extras} top-level folder(s) not in leader's cache for {Letter}: - enumerating just those folders (reader sees {Reader}, cache sees {Cache})",
             extras.Count, dc.Drive.Letter, readerFolders.Count, cacheTopFolderIds.Count);
 
         // Targeted enumeration. For each divergent folder, ask HydrationService to
-        // enumerate its immediate children — typically one Graph call per folder.
+        // enumerate its immediate children - typically one Graph call per folder.
         // Deeper levels (HR/Payroll/2024/, etc.) populate on demand via the
         // existing lazy-fallback path when the user actually navigates to them.
         // This is dramatically cheaper than running a full /drive/root/delta
@@ -279,7 +279,7 @@ internal sealed class CooperativePollingService : IAsyncDisposable
 
     /// <summary>
     /// Periodic delta-query self-check that catches items the leader's cache
-    /// couldn't see (permission islands). Cheap — uses a delta token so each
+    /// couldn't see (permission islands). Cheap - uses a delta token so each
     /// run returns only what's changed since last poll. Runs much less often
     /// than the renew loop so the total Graph cost stays small.
     /// </summary>
@@ -327,7 +327,7 @@ internal sealed class CooperativePollingService : IAsyncDisposable
         await dc.SyncEngine.DeltaPoller.PollDriveAsync(dc.Drive, ct);
         var postCount = dc.SyncEngine.Metadata.GetForDrive(dc.Drive.ConfigId).Count;
         _logger.Information(
-            "Self-check completed for {Letter}: (metadata items {Before} → {After}, delta {Delta:+0;-0;0})",
+            "Self-check completed for {Letter}: (metadata items {Before} -> {After}, delta {Delta:+0;-0;0})",
             dc.Drive.Letter, preCount, postCount, postCount - preCount);
     }
 
@@ -344,7 +344,7 @@ internal sealed class CooperativePollingService : IAsyncDisposable
                 if (dc.Drive.ConfigId != drive.ConfigId) continue;
                 // Reader = leader is writing the cache for us; skip our own poll.
                 // NotParticipating = either coop is disabled for this drive or
-                // we're permission-limited without a current leader — fall back
+                // we're permission-limited without a current leader - fall back
                 // to per-user polling so we don't go blind.
                 return dc.Election.Role == LeaderRole.Reader;
             }

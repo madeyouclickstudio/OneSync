@@ -131,7 +131,7 @@ internal sealed class GraphHttpClient : IDisposable
             attempt++;
             string? lastTriggerUrl = null;
             // Preempt Graph 429s by self-throttling first. Retries (cycles 2+
-            // of this while loop) also consume tokens — intentional, since a
+            // of this while loop) also consume tokens - intentional, since a
             // retried request is still a Graph request the server has to handle.
             if (_rateLimiter is not null)
             {

@@ -16,7 +16,7 @@ namespace OneSync;
 /// double-click in Explorer routes here. We look up the SharePoint webUrl
 /// for the file in MetadataStore and launch Office with
 /// <c>ms-word:ofe|u|&lt;url&gt;</c> (or excel/powerpoint equivalent), which
-/// makes Office open the file directly from SharePoint — co-authoring and
+/// makes Office open the file directly from SharePoint - co-authoring and
 /// AutoSave activate natively, same as if the user opened the file from
 /// Office.com or the native OneDrive client.
 ///
@@ -26,7 +26,7 @@ namespace OneSync;
 ///   - Anything in the lookup throws
 ///
 /// MUST be fast: the user is sitting at Explorer waiting for Word to appear.
-/// We do the absolute minimum work — open MetadataStore in shared mode,
+/// We do the absolute minimum work - open MetadataStore in shared mode,
 /// one lookup, one Process.Start, exit.
 /// </summary>
 internal static class OfficeLauncher
@@ -58,7 +58,7 @@ internal static class OfficeLauncher
         {
             // Resolve the file path to (DriveConfig, relative path).
             // OneSync drives are subst-mapped/Dokan-mapped to local NTFS
-            // folders under %LOCALAPPDATA%\OneSync\Drives\... — but file
+            // folders under %LOCALAPPDATA%\OneSync\Drives\... - but file
             // associations get the H:\... / I:\... / J:\... drive-letter
             // form. We normalise both ways.
             var (drive, relativePath) = ResolveToConfiguredDrive(filePath, logger);
@@ -78,7 +78,7 @@ internal static class OfficeLauncher
 
             if (string.IsNullOrEmpty(webUrl))
             {
-                logger.Information("No webUrl for {Path} (drive {Drive}, rel {Rel}) — opening locally",
+                logger.Information("No webUrl for {Path} (drive {Drive}, rel {Rel}) - opening locally",
                     filePath, drive.Letter, relativePath);
                 return OpenLocally(filePath);
             }
@@ -109,7 +109,7 @@ internal static class OfficeLauncher
 
             logger.Information("Direct URL: {Url}", directUrl);
 
-            // ms-word:ofe|u|<url> — "ofe" = "open for editing"
+            // ms-word:ofe|u|<url> - "ofe" = "open for editing"
             var protocolUrl = $"{scheme}:ofe|u|{directUrl}";
 
             logger.Information("Redirecting to {Url}", protocolUrl);
@@ -143,7 +143,7 @@ internal static class OfficeLauncher
     /// <summary>
     /// Construct the direct SharePoint file URL that ms-word:ofe / ms-excel:ofe /
     /// ms-powerpoint:ofe expect. Graph's webUrl is the wrong format (Office Web
-    /// Viewer entry-point URL — .../_layouts/15/Doc.aspx?...), so we build the
+    /// Viewer entry-point URL - .../_layouts/15/Doc.aspx?...), so we build the
     /// direct one ourselves by extracting the site root from webUrl.
     /// </summary>
     private static string? BuildDirectSharePointUrl(
@@ -164,7 +164,7 @@ internal static class OfficeLauncher
                 var idx = graphWebUrl.IndexOf("/_layouts", StringComparison.OrdinalIgnoreCase);
                 if (idx < 0)
                 {
-                    logger.Debug("No /_layouts in webUrl '{Url}' — cannot extract site root", graphWebUrl);
+                    logger.Debug("No /_layouts in webUrl '{Url}' - cannot extract site root", graphWebUrl);
                     return null;
                 }
                 var personalRoot = graphWebUrl.Substring(0, idx);
@@ -176,10 +176,10 @@ internal static class OfficeLauncher
                 // Use the Graph-canonical library URL as the root, then append
                 // the file's relative path. The library DISPLAY NAME (in config
                 // as `libraryName`) is often "Documents" but the actual URL SLUG
-                // is "Shared Documents" on modern team sites — and the slug is
+                // is "Shared Documents" on modern team sites - and the slug is
                 // what Office needs. Graph's drive.webUrl gives us the slug.
                 //
-                // Doc.aspx URLs DO NOT work via ms-excel:ofe|u| — Office returns
+                // Doc.aspx URLs DO NOT work via ms-excel:ofe|u| - Office returns
                 // "this action couldn't be performed because office doesn't
                 // recognise the command it was given" (the embedded & chars
                 // break the protocol parser).
@@ -189,11 +189,11 @@ internal static class OfficeLauncher
             {
                 // Fallback when ResolvedLibraryWebUrl wasn't populated (e.g.
                 // the DriveResolutionStore sidecar is missing or stale).
-                // Best-effort guess using the display name — may construct
+                // Best-effort guess using the display name - may construct
                 // an invalid URL on modern team sites where slug ≠ display name.
                 var libraryName = string.IsNullOrEmpty(drive.LibraryName) ? "Shared Documents" : drive.LibraryName!;
                 var libraryEscaped = Uri.EscapeDataString(libraryName);
-                logger.Warning("ResolvedLibraryWebUrl unavailable for {Letter}: — falling back to siteUrl+libraryName (may be wrong if library slug differs from display name)", drive.Letter);
+                logger.Warning("ResolvedLibraryWebUrl unavailable for {Letter}: - falling back to siteUrl+libraryName (may be wrong if library slug differs from display name)", drive.Letter);
                 return $"{drive.SiteUrl.TrimEnd('/')}/{libraryEscaped}/{escapedRel}";
             }
         }
@@ -219,7 +219,7 @@ internal static class OfficeLauncher
         }
         catch (Exception ex)
         {
-            logger.Warning(ex, "Could not load config — falling back");
+            logger.Warning(ex, "Could not load config - falling back");
             return (null, "");
         }
 
@@ -269,7 +269,7 @@ internal static class OfficeLauncher
             if (item == null)
             {
                 // Diagnostic: try a few variants in case key normalization differs
-                logger.Information("Direct lookup miss for {Drive}/{Path} — trying variants",
+                logger.Information("Direct lookup miss for {Drive}/{Path} - trying variants",
                     drive.ConfigId, relativePath);
 
                 var variants = new[]
@@ -308,7 +308,7 @@ internal static class OfficeLauncher
     /// <summary>
     /// Open the file with Office directly. We DON'T use ShellExecute on the
     /// file path because we ARE the registered default for .docx/.xlsx/.pptx
-    /// — that would recurse infinitely. We invoke WINWORD.EXE / EXCEL.EXE /
+    /// - that would recurse infinitely. We invoke WINWORD.EXE / EXCEL.EXE /
     /// POWERPNT.EXE explicitly with the file path as an argument.
     /// </summary>
     private static int OpenLocally(string filePath)
@@ -328,7 +328,7 @@ internal static class OfficeLauncher
 
             if (exeName == null)
             {
-                // Unknown extension — last-resort ShellExecute, but only if we
+                // Unknown extension - last-resort ShellExecute, but only if we
                 // didn't claim this extension ourselves.
                 Process.Start(new ProcessStartInfo
                 {
@@ -341,7 +341,7 @@ internal static class OfficeLauncher
             var officeExePath = FindOfficeExe(exeName);
             if (string.IsNullOrEmpty(officeExePath))
             {
-                // No Office found — fall back to ShellExecute. This MIGHT
+                // No Office found - fall back to ShellExecute. This MIGHT
                 // recurse if we're the default, but at this point we have
                 // no better option.
                 Process.Start(new ProcessStartInfo

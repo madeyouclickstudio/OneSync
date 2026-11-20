@@ -23,8 +23,8 @@ namespace OneSync.Tools;
 /// under ~70k items, shifting toward 80/20 above that (large document
 /// libraries tend to be folder-heavy in practice).
 ///
-/// Each N is measured twice — full cache (maxAgeDays=0) and sliding window
-/// (maxAgeDays=30) — via DeltaCache.BuildPayload, the same code path
+/// Each N is measured twice - full cache (maxAgeDays=0) and sliding window
+/// (maxAgeDays=30) - via DeltaCache.BuildPayload, the same code path
 /// production uses, so the numbers reflect the real cost the leader and
 /// readers pay.
 /// </summary>
@@ -63,7 +63,7 @@ internal static class CacheSizeProbe
         sb.AppendLine("Note: synthetic file `LastModified` is uniform across last 365 days, so the");
         sb.AppendLine($"sliding-window filter (which drops files older than {SlidingWindowDays} days but keeps every folder)");
         sb.AppendLine($"retains roughly {SlidingWindowDays}/365 ≈ 8% of files. Real-world libraries skew newer, so production");
-        sb.AppendLine("sliding-window size is likely between the two columns below — closer to the");
+        sb.AppendLine("sliding-window size is likely between the two columns below - closer to the");
         sb.AppendLine("sliding-window number for cold libraries, closer to the full-cache number for");
         sb.AppendLine("actively-edited libraries.");
         sb.AppendLine();
@@ -85,7 +85,7 @@ internal static class CacheSizeProbe
             var (folderCount, fileCount) = RatioFor(n);
             var remoteItems = BuildSyntheticRemoteItems(folderCount, fileCount, driveConfigId: "probe");
 
-            // FULL CACHE (maxAgeDays=0) — every item included
+            // FULL CACHE (maxAgeDays=0) - every item included
             var fullPayload = DeltaCache.BuildPayload(
                 "synthetic-user", "probe@local", Environment.MachineName, "probe",
                 deltaToken: "synthetic-token",
@@ -95,7 +95,7 @@ internal static class CacheSizeProbe
             var fullBytes = JsonSerializer.SerializeToUtf8Bytes(fullPayload, prodJsonOpts);
             fullSw.Stop();
 
-            // SLIDING WINDOW (maxAgeDays=30) — files filtered, folders kept
+            // SLIDING WINDOW (maxAgeDays=30) - files filtered, folders kept
             var slidingPayload = DeltaCache.BuildPayload(
                 "synthetic-user", "probe@local", Environment.MachineName, "probe",
                 deltaToken: "synthetic-token",
@@ -120,7 +120,7 @@ internal static class CacheSizeProbe
         sb.AppendLine();
         sb.AppendLine("Fill in by hand after inspecting the table above. Spec gate at 351k items:");
         sb.AppendLine("- **Sliding KB ≤ 51200 (50 MB)** AND **Sliding write ≤ 250 ms** ⇒ PASS, production design holds.");
-        sb.AppendLine("- Full KB column is informational — production never serialises the full cache when `maxAgeDays > 0`.");
+        sb.AppendLine("- Full KB column is informational - production never serialises the full cache when `maxAgeDays > 0`.");
         sb.AppendLine();
         sb.AppendLine("If only the FULL column fails: the spec is satisfied by keeping `cacheItemMaxAgeDays = 30` (current default).");
         sb.AppendLine("If SLIDING also fails: ship a smaller window (e.g. 14 days) or move to delta-encoded cache format.");
@@ -150,7 +150,7 @@ internal static class CacheSizeProbe
         var items = new List<RemoteItem>(folderCount + fileCount);
         var rng = new Random(42);  // deterministic
 
-        // Folders — 1..4 levels deep
+        // Folders - 1..4 levels deep
         for (int i = 0; i < folderCount; i++)
         {
             var depth = 1 + (i % 4);
@@ -178,7 +178,7 @@ internal static class CacheSizeProbe
             });
         }
 
-        // Files — log-distributed sizes, uniform last-modified across 365 days
+        // Files - log-distributed sizes, uniform last-modified across 365 days
         for (int i = 0; i < fileCount; i++)
         {
             var sizeKB = (long)Math.Pow(2, rng.NextDouble() * 15);  // ~1 KB..32 MB

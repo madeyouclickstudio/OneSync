@@ -61,7 +61,7 @@ internal sealed class RemoteItem
     public DateTime LastSyncedAt { get; set; }
 
     /// <summary>When this file was last opened locally (Dokan CreateFile) or hydrated.
-    /// Used by LruEvictionService to pick eviction victims — oldest accessed first.
+    /// Used by LruEvictionService to pick eviction victims - oldest accessed first.
     /// Updated by HydrationService on download and by the Dokan layer on file open.</summary>
     public DateTime LastAccessedAt { get; set; }
 

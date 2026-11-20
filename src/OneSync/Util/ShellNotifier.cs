@@ -11,12 +11,12 @@ namespace OneSync.Util;
 /// "I just changed this file" / "I just added this file" / "the icon for
 /// this file changed" without dealing with the P/Invoke surface.
 ///
-/// Explorer doesn't auto-watch every folder — it listens for SHChangeNotify
+/// Explorer doesn't auto-watch every folder - it listens for SHChangeNotify
 /// broadcasts and refreshes only the views that match. Without these calls,
-/// users have to F5 / right-click → Refresh to see new placeholders, the
+/// users have to F5 / right-click -> Refresh to see new placeholders, the
 /// sync overlay icon transitions, or the size-after-hydration update.
 ///
-/// Each notification fires TWICE — once for the local NTFS path (where
+/// Each notification fires TWICE - once for the local NTFS path (where
 /// PlaceholderManager / HydrationService actually wrote) and once for the
 /// Dokan-mapped drive-letter path (where the user is looking in Explorer).
 /// Both have to be notified separately because Windows doesn't know they're
@@ -155,8 +155,8 @@ internal static class ShellNotifier
     {
         try
         {
-            // SHCNF_PATHW = 0x0005 — both pointers are wide-string paths.
-            // SHCNF_FLUSHNOWAIT = 0x2000 — fire-and-forget, don't block our thread.
+            // SHCNF_PATHW = 0x0005 - both pointers are wide-string paths.
+            // SHCNF_FLUSHNOWAIT = 0x2000 - fire-and-forget, don't block our thread.
             var flags = SHCNF.PATHW | SHCNF.FLUSHNOWAIT;
             var p1 = path1 != null ? Marshal.StringToHGlobalUni(path1) : IntPtr.Zero;
             var p2 = path2 != null ? Marshal.StringToHGlobalUni(path2) : IntPtr.Zero;

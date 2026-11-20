@@ -47,7 +47,7 @@ Most of these came from running similar tools in production at a single school a
 
 - **Drive letters, not user-profile folders.** Network-drive style (`H:`, `I:`, `J:`) matches the mental model schools have used for decades. No retraining users to navigate `%USERPROFILE%\OneDrive — Tenant`.
 - **Multi-library out of the box.** Mount any number of SharePoint document libraries alongside OneDrive without per-user sync-pair fiddling.
-- **Bounded local footprint.** Session-cache mode wipes the placeholder metadata on graceful shutdown so persistent staff profiles never accumulate gigabytes of sync state. Hydrated file content and pending uploads survive the wipe.
+- **Bounded local footprint.** Session-cache mode drops the records and placeholders for cloud-only files at the start of each session, so persistent staff profiles never accumulate gigabytes of sync state. Downloaded files, their records and anything not yet uploaded are kept.
 - **Lazy-by-default.** No initial folder-walk storm at mount. Folder enumerations happen only when the user opens that folder. First-time login on a fresh machine costs a handful of small Graph requests, not thousands.
 - **Office co-authoring.** Double-clicking an Office document opens it directly via the SharePoint URL, so AutoSave and real-time co-authoring work the same as opening from the web. (On existing user profiles where Word / Excel / PowerPoint are already the default app, you may need to set OneSync as the default for `.docx` / `.xlsx` / `.pptx` once — see the FAQ.)
 
@@ -127,7 +127,7 @@ The cloud copy is untouched — OneSync never deletes anything from OneDrive or 
 **Will hydrated files eventually clog up the user's local disk?**
 No. OneSync has a background LRU eviction service. With defaults:
 - When local free space drops below **2 GB**, OneSync starts truncating the least-recently-used hydrated files back to 0-byte placeholders, until **4 GB** is free again.
-- Files accessed in the last **15 minutes** are exempt (so it never yanks a file you're actively editing).
+- Files accessed in the last **15 minutes** are exempt (so it never yanks a file you're actively editing), and so is any file with changes that haven't reached the cloud yet.
 - The cloud copy is never touched — only the local cached bytes. Next time the user opens an evicted file, OneSync re-hydrates it transparently.
 - All thresholds are tunable in `config.json` (`evictionEnabled`, `evictionFreeSpaceThresholdGB`, `evictionTargetFreeSpaceGB`, `evictionMinAgeMinutes`).
 

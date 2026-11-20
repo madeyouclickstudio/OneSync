@@ -48,7 +48,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
     public int ActiveEnumerationCount => Volatile.Read(ref _activeEnumerations);
 
     /// <summary>Fires when the in-flight enumeration count changes (debounced to
-    /// transition events: 0→N and N→0). Tray uses this to update the tooltip.</summary>
+    /// transition events: 0->N and N->0). Tray uses this to update the tooltip.</summary>
     public event Action<int>? ActiveEnumerationsChanged;
 
     /// <summary>
@@ -336,7 +336,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
 
         var key = $"{drive.ConfigId}::{folderRelativePath}";
 
-        // Fast path: already enumerated this process — skip without touching disk.
+        // Fast path: already enumerated this process - skip without touching disk.
         if (_enumeratedFolders.ContainsKey(key))
             return false;
 
@@ -350,7 +350,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
                 // Self-heal: previous enumeration succeeded and the items are in
                 // metadata, but the local backing folder may have been wiped (or only
                 // partially rebuilt). If disk has fewer entries than metadata expects,
-                // materialise the missing placeholders from existing metadata — no
+                // materialise the missing placeholders from existing metadata - no
                 // Graph call needed. Catches the case where the eager rebuild is
                 // disabled (background drives) and a folder was partially populated
                 // before the rebuild was interrupted.
@@ -407,7 +407,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
             return false;
 
         // Bounded blocking. The Dokan FindFiles callback is synchronous, so we
-        // can't return until we have the listing — but if Graph hangs we'd
+        // can't return until we have the listing - but if Graph hangs we'd
         // freeze Explorer for up to MaxRetryAfterSeconds. Cap at OnDemandEnumerationTimeoutSeconds
         // and pass the CT through to the Graph SendAsync calls so they cancel cleanly
         // rather than silently soaking the timeout in C# code.
@@ -420,7 +420,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         catch (OperationCanceledException)
         {
             _logger.Warning(
-                "On-demand enumeration timed out after {Seconds}s for {Drive}:{Path} — Explorer will see an empty folder; next browse retries",
+                "On-demand enumeration timed out after {Seconds}s for {Drive}:{Path} - Explorer will see an empty folder; next browse retries",
                 OnDemandEnumerationTimeoutSeconds, drive.Letter, folderRelativePath);
             _enumeratedFolders.TryRemove(key, out _);
             return false;
@@ -445,7 +445,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
     /// <summary>If the local backing folder has fewer direct entries than metadata
     /// expects, create the missing placeholders from existing metadata (no Graph
     /// call). Returns true if any placeholders were created, false otherwise.
-    /// Handles the root path "/" too — root-level direct children are found by
+    /// Handles the root path "/" too - root-level direct children are found by
     /// MetadataStore.GetDirectChildrenByPath's root special case.</summary>
     private bool MaterializeMissingPlaceholdersIfNeeded(DriveConfig drive, string folderRelativePath)
     {
@@ -472,7 +472,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         if (diskCount >= children.Count) return false;  // disk has at least what metadata says
 
         _logger.Information(
-            "Self-heal: {Drive}:{Path} has {Disk} local entries but metadata expects {Meta} — materialising missing placeholders from metadata (no Graph call)",
+            "Self-heal: {Drive}:{Path} has {Disk} local entries but metadata expects {Meta} - materialising missing placeholders from metadata (no Graph call)",
             drive.Letter, folderRelativePath, diskCount, children.Count);
 
         int created = 0;
@@ -607,7 +607,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         }
 
         if (created > 0)
-            _logger.Information("On-demand enumeration complete: {Drive}:{Path} — {Count} items",
+            _logger.Information("On-demand enumeration complete: {Drive}:{Path} - {Count} items",
                 drive.Letter, folderRelativePath, created);
 
         return created > 0;

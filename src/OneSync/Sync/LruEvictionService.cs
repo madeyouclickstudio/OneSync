@@ -12,40 +12,10 @@ using Serilog;
 namespace OneSync.Sync;
 
 /// <summary>
-/// LRU local-disk eviction. When free space on the volume hosting
-/// <see cref="AppConfig.LocalStorageRoot"/> drops below
-/// <see cref="SyncSettings.EvictionFreeSpaceThresholdGB"/>, this service
-/// truncates the least-recently-used hydrated files back to 0-byte
-/// placeholders. The cloud copy is NEVER touched.
-///
-/// Critical safety invariants (do not change without re-validating every one):
-///
-/// 1. ZERO REMOTE OPERATIONS. This class holds no reference to GraphHttpClient,
-///    UploadWorker, or anything that talks to Graph. The only outbound effect
-///    of an eviction is `File.Open(... FileMode.Truncate ...)` on a local file
-///    and a `_metadata.MarkDehydrated(...)` call.
-///
-/// 2. SUPPRESS LOCAL WATCHER. Before truncating a file, the local-change
-///    suppressor is engaged for that path. Without this, the FileSystemWatcher
-///    would see a "Changed" event with size=0 and enqueue an upload that
-///    would overwrite the cloud copy with empty content. The suppressor is
-///    held for SuppressionGracePeriod AFTER eviction completes to swallow
-///    any debounced watcher events.
-///
-/// 3. SKIP PENDING UPLOADS. If the SyncQueue has any pending operation for
-///    this path, we don't evict — uploading is the wrong moment to throw
-///    away the local copy. Modified files always upload first.
-///
-/// 4. SKIP RECENTLY-ACCESSED. Files touched within
-///    <see cref="SyncSettings.EvictionMinAgeMinutes"/> are off-limits even
-///    when disk is full — protects the file the user is actively working with.
-///
-/// 5. EXCLUSIVE LOCK CHECK. The file is opened with FileShare.None during
-///    truncation. If anything else has it open (Word, antivirus, Explorer
-///    preview), the eviction silently skips and tries another victim.
-///
-/// 6. IDEMPOTENCE. Re-evicting an already-evicted file is a no-op (file is
-///    already 0 bytes and metadata says Hydrated=false).
+/// Frees disk space when the drive holding the local copies runs low, by turning
+/// the least recently used downloaded files back into placeholders. Only local
+/// files are touched. A file is skipped if it has changes the cloud doesn't
+/// have, has anything queued for it, was used recently, or is open elsewhere.
 /// </summary>
 internal sealed class LruEvictionService : IAsyncDisposable
 {
@@ -113,7 +83,7 @@ internal sealed class LruEvictionService : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                _logger.Warning(ex, "Eviction cycle threw — continuing");
+                _logger.Warning(ex, "Eviction cycle threw - continuing");
             }
 
             try
@@ -135,14 +105,14 @@ internal sealed class LruEvictionService : IAsyncDisposable
 
         if (freeBytes >= thresholdBytes)
         {
-            _logger.Debug("Disk free {FreeGB:N1} GB >= threshold {ThresholdGB} GB — no eviction needed",
+            _logger.Debug("Disk free {FreeGB:N1} GB >= threshold {ThresholdGB} GB - no eviction needed",
                 freeBytes / 1024.0 / 1024.0 / 1024.0,
                 _settings.EvictionFreeSpaceThresholdGB);
             return;
         }
 
         _logger.Information(
-            "Disk free {FreeGB:N1} GB below threshold {ThresholdGB} GB — beginning eviction (target {TargetGB} GB)",
+            "Disk free {FreeGB:N1} GB below threshold {ThresholdGB} GB - beginning eviction (target {TargetGB} GB)",
             freeBytes / 1024.0 / 1024.0 / 1024.0,
             _settings.EvictionFreeSpaceThresholdGB,
             _settings.EvictionTargetFreeSpaceGB);
@@ -153,7 +123,7 @@ internal sealed class LruEvictionService : IAsyncDisposable
         DateTime now = DateTime.UtcNow;
         DateTime minAgeCutoff = now.AddMinutes(-_settings.EvictionMinAgeMinutes);
 
-        // Process drives in priority order — evict from lower-priority drives first.
+        // Process drives in priority order - evict from lower-priority drives first.
         // (e.g., shared SharePoint libraries before personal OneDrive)
         var drivesByPriority = _drives.OrderByDescending(d => d.Priority).ToList();
 
@@ -173,7 +143,7 @@ internal sealed class LruEvictionService : IAsyncDisposable
                 {
                     // All remaining candidates are even fresher (sorted ASC),
                     // so stop for this drive.
-                    _logger.Debug("Reached the {MinAge}-minute fresh window for {Drive} — stopping eviction here",
+                    _logger.Debug("Reached the {MinAge}-minute fresh window for {Drive} - stopping eviction here",
                         _settings.EvictionMinAgeMinutes, drive.Letter);
                     break;
                 }
@@ -207,7 +177,7 @@ internal sealed class LruEvictionService : IAsyncDisposable
         string localPath = BuildLocalPath(drive, item.RelativePath);
 
         // Safety check 1: pending uploads. If this item has any queued sync
-        // operation, leave it alone — the upload will resolve and the file
+        // operation, leave it alone - the upload will resolve and the file
         // becomes a candidate next cycle.
         if (_queue.HasPendingForPath(drive.ConfigId, item.RelativePath))
         {
@@ -246,7 +216,7 @@ internal sealed class LruEvictionService : IAsyncDisposable
         {
             // Safety check 4: exclusive lock. We open with FileShare.None so
             // if Word / antivirus / preview pane has the file open, this
-            // throws and we skip cleanly — no risk of mid-edit truncation.
+            // throws and we skip cleanly - no risk of mid-edit truncation.
             using (var fs = new FileStream(localPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
                 // Truncate to 0.
@@ -295,7 +265,7 @@ internal sealed class LruEvictionService : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Eviction failed for {Path} — releasing suppressor and skipping",
+            _logger.Warning(ex, "Eviction failed for {Path} - releasing suppressor and skipping",
                 item.RelativePath);
             try { _suppressor.Release(localPath); } catch { }
             return false;
@@ -328,7 +298,7 @@ internal sealed class LruEvictionService : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "GetFreeBytes failed — returning MAX so we don't accidentally evict");
+            _logger.Debug(ex, "GetFreeBytes failed - returning MAX so we don't accidentally evict");
             return long.MaxValue;
         }
     }

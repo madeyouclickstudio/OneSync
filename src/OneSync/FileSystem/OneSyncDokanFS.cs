@@ -87,7 +87,7 @@ internal sealed class OneSyncDokanFS : IDokanOperations
         if (rel == "/" || rel.Length == 0) return;
 
         // If Graph is throttled, we'd otherwise block this Dokan thread for up
-        // to 10 minutes inside WaitForCooldownAsync — long enough for Explorer
+        // to 10 minutes inside WaitForCooldownAsync - long enough for Explorer
         // to mark the operation "Not Responding" and for the user to kill it.
         // Instead: kick off the hydration in the background so it completes
         // when the cooldown lifts, and return immediately. Explorer's ReadFile

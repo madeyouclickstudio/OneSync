@@ -36,14 +36,14 @@ internal static class SessionCacheCleaner
     {
         if (!config.SyncSettings.SessionCacheMode)
         {
-            logger.Debug("SessionCacheMode disabled — skipping session-start wipe");
+            logger.Debug("SessionCacheMode disabled - skipping session-start wipe");
             return;
         }
 
         var metadataPath = Path.Combine(stateDir, "metadata.db");
         if (!File.Exists(metadataPath))
         {
-            logger.Debug("No metadata.db present — nothing to wipe");
+            logger.Debug("No metadata.db present - nothing to wipe");
             return;
         }
 
@@ -65,7 +65,7 @@ internal static class SessionCacheCleaner
 
         // 1) Delete delta tokens from sync_queue.db (preserve pending sync_ops).
         //    Must run BEFORE deleting metadata.db so we know SyncQueue can still
-        //    open its own file — they live side by side but are independent DBs.
+        //    open its own file - they live side by side but are independent DBs.
         try
         {
             var syncQueuePath = Path.Combine(stateDir, "sync_queue.db");
@@ -78,7 +78,7 @@ internal static class SessionCacheCleaner
         }
         catch (Exception ex)
         {
-            logger.Warning(ex, "Failed clearing delta tokens — continuing wipe");
+            logger.Warning(ex, "Failed clearing delta tokens - continuing wipe");
         }
 
         // 2) Drop cloud-only placeholders and their records; keep everything
@@ -189,17 +189,17 @@ internal static class SessionCacheCleaner
                 needsCompact = age > TimeSpan.FromDays(SyncQueueCompactionMaxAgeDays);
                 if (needsCompact)
                     logger.Information(
-                        "sync_queue.db compaction overdue: last ran {Days:F1} days ago (>{Limit}d) — compacting on startup",
+                        "sync_queue.db compaction overdue: last ran {Days:F1} days ago (>{Limit}d) - compacting on startup",
                         age.TotalDays, SyncQueueCompactionMaxAgeDays);
             }
             catch
             {
-                needsCompact = true; // can't read marker — treat as stale
+                needsCompact = true; // can't read marker - treat as stale
             }
         }
         else
         {
-            logger.Information("sync_queue.db has no compaction marker — running first compaction on startup");
+            logger.Information("sync_queue.db has no compaction marker - running first compaction on startup");
         }
 
         if (!needsCompact) return;
@@ -214,7 +214,7 @@ internal static class SessionCacheCleaner
             var sizeAfter = new FileInfo(syncQueuePath).Length;
             File.WriteAllText(marker, DateTime.UtcNow.ToString("O"));
             logger.Information(
-                "sync_queue.db compacted: {Before} → {After} bytes ({DeltaPercent:F0}% reclaimed)",
+                "sync_queue.db compacted: {Before} -> {After} bytes ({DeltaPercent:F0}% reclaimed)",
                 sizeBefore, sizeAfter,
                 sizeBefore > 0 ? (sizeBefore - sizeAfter) * 100.0 / sizeBefore : 0);
         }

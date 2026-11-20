@@ -85,7 +85,7 @@ internal sealed class TrayIcon : IDisposable
         // On-demand folder enumeration: show a one-shot balloon the first time the
         // user triggers Graph /children after launch (when session-cache mode is
         // wiping the cache each session, the first navigation post-login briefly
-        // shows empty folders — this tells them it's normal, not broken).
+        // shows empty folders - this tells them it's normal, not broken).
         sync.Hydration.ActiveEnumerationsChanged += OnActiveEnumerationsChanged;
 
         // Upload progress events (wired after sync.Start() runs, since Uploader
@@ -209,7 +209,7 @@ internal sealed class TrayIcon : IDisposable
                                : age.TotalHours >= 1 ? $"{(int)age.TotalHours} hour{(age.TotalHours >= 2 ? "s" : "")} ago"
                                : "just now";
                     var fileList = m.Extra > 0 ? $"{m.Files}, +{m.Extra} more" : m.Files;
-                    lines.Add($"• {m.Machine}: {m.Count} file{(m.Count == 1 ? "" : "s")} ({fileList}) — last queued {ago}");
+                    lines.Add($"• {m.Machine}: {m.Count} file{(m.Count == 1 ? "" : "s")} ({fileList}) - last queued {ago}");
                 }
 
                 var body =
@@ -293,7 +293,7 @@ internal sealed class TrayIcon : IDisposable
         {
             var quota = _quotaCache.GetCached(drive);
             var sizeText = quota.TotalBytes > 0
-                ? $" — {FormatBytes(quota.RemainingBytes)} free"
+                ? $" - {FormatBytes(quota.RemainingBytes)} free"
                 : "";
             var label = $"{drive.Letter}: {drive.Label}{sizeText}";
             var item = new ToolStripMenuItem(label, image: null,
@@ -339,13 +339,13 @@ internal sealed class TrayIcon : IDisposable
         }
         _menu.Items.Add(pauseRoot);
 
-        // Sync submenu — two groups:
-        //   1. "Refresh from cloud" — fire an immediate delta poll so newly-added
+        // Sync submenu - two groups:
+        //   1. "Refresh from cloud" - fire an immediate delta poll so newly-added
         //      remote files appear in seconds instead of waiting for the next tick.
-        //   2. "Force full resync" — wipe local delta state, re-fetch everything.
+        //   2. "Force full resync" - wipe local delta state, re-fetch everything.
         var syncRoot = new ToolStripMenuItem("Sync");
 
-        // Group 1: quick refresh (cheap — one delta call per drive)
+        // Group 1: quick refresh (cheap - one delta call per drive)
         syncRoot.DropDownItems.Add(new ToolStripMenuItem(
             "Refresh all drives from cloud now",
             image: null,
@@ -361,7 +361,7 @@ internal sealed class TrayIcon : IDisposable
 
         syncRoot.DropDownItems.Add(new ToolStripSeparator());
 
-        // Group 2: force full resync (expensive — wipes delta token + metadata)
+        // Group 2: force full resync (expensive - wipes delta token + metadata)
         foreach (var drive in _drives)
         {
             var driveCapture = drive;
@@ -536,7 +536,7 @@ internal sealed class TrayIcon : IDisposable
                   "Your files and any changes still uploading are kept. Each folder is " +
                   "listed again from the cloud the next time you open it.\n\n" +
                   "Continue?",
-            caption: "OneSync — Force full resync",
+            caption: "OneSync - Force full resync",
             buttons: MessageBoxButtons.YesNo,
             icon: MessageBoxIcon.Warning,
             defaultButton: MessageBoxDefaultButton.Button2);
@@ -549,7 +549,7 @@ internal sealed class TrayIcon : IDisposable
             _sync.Metadata.ClearForDrive(drive.ConfigId);
             _sync.Hydration.ClearEnumerationStateForDrive(drive.ConfigId);
             _icon.ShowBalloonTip(5000, "OneSync",
-                $"Re-syncing {drive.Letter}: — this may take a few minutes.",
+                $"Re-syncing {drive.Letter}: - this may take a few minutes.",
                 ToolTipIcon.Info);
         }
         catch (Exception ex)

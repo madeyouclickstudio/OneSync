@@ -122,7 +122,7 @@ internal sealed class DrivePermissionChecker
             }
 
             _logger.Information(
-                "SharePoint {Letter}: site resolved — id={SiteId}, name='{Name}', url='{Url}'",
+                "SharePoint {Letter}: site resolved - id={SiteId}, name='{Name}', url='{Url}'",
                 drive.Letter, site.Id, site.DisplayName, site.WebUrl);
 
             var drivesResult = await _graph.Sites[site.Id].Drives
@@ -138,7 +138,7 @@ internal sealed class DrivePermissionChecker
 
             if (library is null)
             {
-                LogSkip(drive, $"Library '{drive.LibraryName}' not found in site '{siteRef}' — available: [{string.Join(", ", availableNames)}]");
+                LogSkip(drive, $"Library '{drive.LibraryName}' not found in site '{siteRef}' - available: [{string.Join(", ", availableNames)}]");
                 return false;
             }
 

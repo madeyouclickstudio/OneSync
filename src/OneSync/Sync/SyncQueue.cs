@@ -200,7 +200,7 @@ internal sealed class SyncQueue : IDisposable
 
     /// <summary>True if this exact (driveConfigId, relativePath) has any pending,
     /// in-progress, or retry op queued. Used by LruEvictionService to skip
-    /// files that are mid-sync — evicting one would race with the upload.</summary>
+    /// files that are mid-sync - evicting one would race with the upload.</summary>
     public bool HasPendingForPath(string driveConfigId, string relativePath)
     {
         lock (_writeLock)
@@ -333,7 +333,7 @@ internal sealed class SyncQueue : IDisposable
             if (stuck.Count > 0)
                 _logger.Information("Reset {Count} interrupted ops back to Pending on startup", stuck.Count);
 
-            // Failed delete/rename ops should be retried — leaving them failed
+            // Failed delete/rename ops should be retried - leaving them failed
             // means the delta poller will recreate the placeholder next poll.
             var failedSyncOps = _ops.Query()
                 .Where(o => o.Status == SyncOpStatus.Failed &&
@@ -472,7 +472,7 @@ internal sealed class SyncQueue : IDisposable
 
     /// <summary>Compacts the LiteDB file in place: Checkpoint folds the WAL log
     /// back into the main file, Rebuild defragments freed pages from completed /
-    /// deleted operations. Pending sync_ops + delta tokens are preserved — this is
+    /// deleted operations. Pending sync_ops + delta tokens are preserved - this is
     /// safe to call at any time. Best-effort; swallows exceptions.</summary>
     public void Compact()
     {
@@ -485,7 +485,7 @@ internal sealed class SyncQueue : IDisposable
             }
             catch
             {
-                // Compaction is opportunistic — a failure here doesn't compromise
+                // Compaction is opportunistic - a failure here doesn't compromise
                 // correctness, just leaves the file un-shrunk until next attempt.
             }
         }

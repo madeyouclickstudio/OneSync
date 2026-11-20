@@ -75,7 +75,7 @@ internal sealed class DriveConfig
 
     /// <summary>The canonical library root URL from Graph (e.g.
     /// "https://contoso.sharepoint.com/sites/TeamSite/Shared%20Documents").
-    /// Used by OfficeLauncher to construct the direct file URL — `libraryName` in
+    /// Used by OfficeLauncher to construct the direct file URL - `libraryName` in
     /// config is the display name and may differ from the URL slug (modern
     /// SharePoint libraries display as "Documents" but URL is "Shared Documents").
     /// Null until DrivePermissionChecker resolves the drive.</summary>
@@ -118,7 +118,7 @@ internal sealed class CleanupConfig
 
 internal sealed class GraphRateLimitConfig
 {
-    /// <summary>Master switch. When false, no client-side throttling — every request
+    /// <summary>Master switch. When false, no client-side throttling - every request
     /// goes straight to the existing cooldown/semaphore wait.</summary>
     [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
 
@@ -161,7 +161,7 @@ internal sealed class SyncSettings
     [JsonPropertyName("enableThumbnailPrefetch")] public bool EnableThumbnailPrefetch { get; set; } = true;
 
     /// <summary>If true, the local metadata cache (metadata.db + 0-byte placeholders)
-    /// is wiped on startup when the previous session ended gracefully — or when the
+    /// is wiped on startup when the previous session ended gracefully - or when the
     /// cache is older than 12h (catches ungraceful exits). Pending uploads in
     /// sync_queue.db and hydrated file content on disk are always preserved.
     /// Design intent: keep per-user disk footprint bounded on persistent profiles
@@ -174,7 +174,7 @@ internal sealed class SyncSettings
     [JsonPropertyName("evictionEnabled")] public bool EvictionEnabled { get; set; } = true;
 
     /// <summary>When local free space (on the volume containing localStorageRoot)
-    /// drops below this in GB, start evicting. Default 2 GB — safe for student
+    /// drops below this in GB, start evicting. Default 2 GB - safe for student
     /// laptops with 64 GB SSDs.</summary>
     [JsonPropertyName("evictionFreeSpaceThresholdGB")] public int EvictionFreeSpaceThresholdGB { get; set; } = 2;
 
@@ -183,11 +183,11 @@ internal sealed class SyncSettings
     [JsonPropertyName("evictionTargetFreeSpaceGB")] public int EvictionTargetFreeSpaceGB { get; set; } = 4;
 
     /// <summary>How often (seconds) the eviction service checks disk free space.
-    /// Cheap check — DriveInfo.AvailableFreeSpace is a single syscall.</summary>
+    /// Cheap check - DriveInfo.AvailableFreeSpace is a single syscall.</summary>
     [JsonPropertyName("evictionCheckIntervalSeconds")] public int EvictionCheckIntervalSeconds { get; set; } = 60;
 
     /// <summary>Don't evict files that were accessed more recently than this many
-    /// minutes ago — protects files the user is currently working with.
+    /// minutes ago - protects files the user is currently working with.
     /// Default 15 minutes.</summary>
     [JsonPropertyName("evictionMinAgeMinutes")] public int EvictionMinAgeMinutes { get; set; } = 15;
 }
@@ -201,7 +201,7 @@ internal sealed class LoggingConfig
 }
 
 /// <summary>
-/// Cooperative polling — one client per shared library does the real delta
+/// Cooperative polling - one client per shared library does the real delta
 /// polling and writes results to a cache file in the library; everyone else
 /// reads the cache. Scales the SharePoint delta query cost from O(users) to
 /// O(1) per library. See docs spec for the leader-election + cache file design.
@@ -209,7 +209,7 @@ internal sealed class LoggingConfig
 internal sealed class CooperativePollingConfig
 {
     /// <summary>Master switch. When false, every client polls Graph independently
-    /// (the pre-1.3 behaviour). Default false during phased rollout — flip per
+    /// (the pre-1.3 behaviour). Default false during phased rollout - flip per
     /// drive once leader election is proven.</summary>
     [JsonPropertyName("enabled")] public bool Enabled { get; set; } = false;
 
@@ -230,13 +230,13 @@ internal sealed class CooperativePollingConfig
     [JsonPropertyName("renewIntervalSeconds")] public int RenewIntervalSeconds { get; set; } = 300;
 
     /// <summary>How often readers pull the cache file from the library to
-    /// pick up the leader's latest delta. Default 5 min — same cadence as
+    /// pick up the leader's latest delta. Default 5 min - same cadence as
     /// the leader's writes, so worst-case staleness is ~one cycle.</summary>
     [JsonPropertyName("readerPollIntervalSeconds")] public int ReaderPollIntervalSeconds { get; set; } = 300;
 
     /// <summary>How often readers do an independent delta query against the
     /// library to catch items the leader couldn't see (permission islands).
-    /// Default 60 min — cheap because each call is a delta token, not a
+    /// Default 60 min - cheap because each call is a delta token, not a
     /// full enumeration.</summary>
     [JsonPropertyName("selfCheckIntervalMinutes")] public int SelfCheckIntervalMinutes { get; set; } = 60;
 
@@ -256,7 +256,7 @@ internal sealed class CooperativePollingConfig
     [JsonPropertyName("forceReaderRoleAlongsideLeader")] public bool ForceReaderRoleAlongsideLeader { get; set; } = false;
 
     /// <summary>Even when the cache contents are unchanged, the leader forces a
-    /// write every N renewal cycles so the WrittenAt timestamp stays fresh —
+    /// write every N renewal cycles so the WrittenAt timestamp stays fresh:
     /// readers use it to detect a stale/dead leader. Default 12 ticks (≈1h at the
     /// 5-minute renew cadence).</summary>
     [JsonPropertyName("cacheForceWriteEveryNCycles")] public int CacheForceWriteEveryNCycles { get; set; } = 12;
@@ -265,7 +265,7 @@ internal sealed class CooperativePollingConfig
     /// Sliding window for the cache: include every folder (so the directory
     /// structure stays browsable) plus only files modified within the last N
     /// days. Older files populate on demand via lazy fallback when a user
-    /// navigates to their folder. Default 30 days — for a 250k-item library
+    /// navigates to their folder. Default 30 days - for a 250k-item library
     /// this drops cache size from ~156 MB to ~20 MB. Set to 0 to disable
     /// filtering and ship a full snapshot every write (the pre-1.2.25
     /// behaviour).

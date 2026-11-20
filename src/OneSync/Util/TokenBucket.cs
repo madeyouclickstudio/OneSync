@@ -14,7 +14,7 @@ namespace OneSync.Util;
 /// blocks (awaiting Task.Delay) when the bucket is empty until the next token
 /// has accrued.
 ///
-/// Refill is computed on demand via Stopwatch elapsed time — no background
+/// Refill is computed on demand via Stopwatch elapsed time - no background
 /// timer thread. Thread-safe under a single small lock; concurrent callers
 /// queue inside Task.Delay, not inside the lock.
 /// </summary>

@@ -307,11 +307,7 @@ internal sealed class SyncEngine : IAsyncDisposable
     {
         _cts = new CancellationTokenSource();
 
-        // If we have remembered metadata for drives whose local Drives folder
-        // has been wiped (e.g. by logoff cleanup), recreate placeholders from
-        // metadata before any watcher starts. Without this, the next delta
-        // poll only fetches changes since the last token and won't recreate
-        // the bulk of placeholders.
+        // Put back placeholders that logoff cleanup removed, before the watchers start.
         RebuildMissingPlaceholders();
 
         foreach (var drive in _drives)
@@ -331,9 +327,8 @@ internal sealed class SyncEngine : IAsyncDisposable
         _reconcileTimer = new System.Threading.Timer(_ => ReconcileLocalChanges(), null,
             TimeSpan.FromSeconds(20), TimeSpan.FromMinutes(10));
 
-        // Push manifest now + every 2 minutes so other machines see this
-        // machine's pending uploads even if it never gets a chance to send a final
-        // snapshot (e.g. abrupt power loss).
+        // Publish this PC's pending uploads now and every 2 minutes, so other PCs
+        // still see them if this one loses power.
         _ = Task.Run(async () => { try { await PushManifestAsync(); } catch { } });
         _manifestPushTimer = new System.Threading.Timer(async _ =>
         {
@@ -347,17 +342,9 @@ internal sealed class SyncEngine : IAsyncDisposable
 
     private void RebuildMissingPlaceholders()
     {
-        // Drives with folder redirection (e.g. H: with Desktop/Documents pointing into it)
-        // need their placeholders eagerly rebuilt — Windows shell folders are visible
-        // immediately at logon and showing them empty is jarring.
-        //
-        // Drives without folder redirection (shared SharePoint libraries — I:, J:) skip
-        // the eager rebuild. Folders the user actually navigates to populate via
-        // HydrationService's lazy-fallback path (cheap on-demand /children call). The
-        // delta poller continues to add placeholders for items it sees in /delta. This
-        // trades "everything ready upfront after a 2-3 hr rebuild for a 350k-item library"
-        // for "folders fill in as you visit them, no startup cost" — much better fit for
-        // libraries you only browse a corner of.
+        // Drives holding redirected folders (Desktop, Documents) are rebuilt straight
+        // away, as they're on screen at logon. Other drives fill in folder by folder
+        // as they're opened.
         var priorityDrives = _drives.Where(d => d.FolderRedirection?.Count > 0).ToList();
         foreach (var drive in priorityDrives)
             RebuildDrivePlaceholders(drive);

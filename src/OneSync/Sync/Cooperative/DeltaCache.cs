@@ -104,7 +104,7 @@ internal sealed class DeltaCache
 
         if (!forceWrite && contentHash == _lastWrittenContentHash)
         {
-            _logger.Debug("Delta cache unchanged since last write ({Items} items) — skipped",
+            _logger.Debug("Delta cache unchanged since last write ({Items} items) - skipped",
                 payload.Items.Count);
             return false;
         }
@@ -139,20 +139,20 @@ internal sealed class DeltaCache
         if (resp.StatusCode == HttpStatusCode.PreconditionFailed)
         {
             _logger.Warning(
-                "Delta cache write rejected (412) — fetching current etag and retrying once");
+                "Delta cache write rejected (412) - fetching current etag and retrying once");
             _lastWrittenEtag = null;
             _lastWrittenContentHash = null;
 
             // Recovery: fetch the current cache file to capture its server etag,
             // then retry the PUT with If-Match. This prevents the next write
             // from going out unconditionally and clobbering a peer's content.
-            // If recovery also fails we give up this cycle — the next lock
+            // If recovery also fails we give up this cycle - the next lock
             // renewal will surface whether we've genuinely lost leadership.
             var fresh = await FetchCurrentEtagAsync(ct);
             if (string.IsNullOrEmpty(fresh))
             {
                 _logger.Warning(
-                    "Delta cache 412 recovery: could not read current etag — skipping write this cycle");
+                    "Delta cache 412 recovery: could not read current etag - skipping write this cycle");
                 return false;
             }
 
@@ -178,7 +178,7 @@ internal sealed class DeltaCache
             }
 
             _logger.Warning(
-                "Delta cache 412 recovery retry returned {Status} — skipping this cycle, lock renewal will reassess leadership",
+                "Delta cache 412 recovery retry returned {Status} - skipping this cycle, lock renewal will reassess leadership",
                 (int)retry.StatusCode);
             return false;
         }
@@ -216,7 +216,7 @@ internal sealed class DeltaCache
 
     /// <summary>
     /// Reads the cache from the library. Uses <c>If-None-Match</c> so that
-    /// repeated reads of an unchanged cache return 304 — the reader pays
+    /// repeated reads of an unchanged cache return 304 - the reader pays
     /// only the round trip, not the body. Returns null if no content has
     /// changed since the last successful read, or if the cache is absent.
     /// </summary>
@@ -251,7 +251,7 @@ internal sealed class DeltaCache
             if (payload.SchemaVersion != DeltaCachePayload.CurrentSchemaVersion)
             {
                 _logger.Warning(
-                    "Delta cache schema mismatch (got {Got}, expected {Expected}) — ignoring",
+                    "Delta cache schema mismatch (got {Got}, expected {Expected}) - ignoring",
                     payload.SchemaVersion, DeltaCachePayload.CurrentSchemaVersion);
                 return null;
             }
@@ -266,7 +266,7 @@ internal sealed class DeltaCache
     }
 
     /// <summary>
-    /// Stable hash of just the items list — independent of leader identity,
+    /// Stable hash of just the items list - independent of leader identity,
     /// WrittenAt timestamp, and delta token. Used to detect whether anything
     /// users care about has actually changed since the last write.
     /// </summary>

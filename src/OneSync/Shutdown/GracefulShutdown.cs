@@ -163,7 +163,7 @@ internal sealed class GracefulShutdown : IDisposable
 
         // Compact sync_queue.db after the flush so completed-and-deleted rows
         // (which LiteDB leaves as fragmented free pages) get reclaimed. Pending
-        // uploads still in the queue survive — this is defragmentation, not a
+        // uploads still in the queue survive - this is defragmentation, not a
         // wipe. Write a marker file so the startup-side defensive sweep knows
         // when compaction last ran.
         try

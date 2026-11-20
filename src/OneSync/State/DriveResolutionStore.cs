@@ -29,7 +29,7 @@ namespace OneSync.State;
 /// </code>
 ///
 /// Keyed by drive letter (stable across config edits; unique per machine).
-/// Write fails are warnings, not errors — the file is best-effort cache;
+/// Write fails are warnings, not errors - the file is best-effort cache;
 /// launcher falls back to its old siteUrl+libraryName construction if the
 /// sidecar is absent.
 /// </summary>
@@ -60,7 +60,7 @@ internal static class DriveResolutionStore
         }
         catch (Exception ex)
         {
-            logger.Warning(ex, "DriveResolutionStore write failed — launcher will fall back to siteUrl+libraryName construction");
+            logger.Warning(ex, "DriveResolutionStore write failed - launcher will fall back to siteUrl+libraryName construction");
         }
     }
 

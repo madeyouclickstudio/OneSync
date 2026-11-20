@@ -92,7 +92,7 @@ internal static class Program
         DialogResult result;
         try
         {
-            result = MessageBox.Show(body, "OneSync — Configuration needed",
+            result = MessageBox.Show(body, "OneSync - Configuration needed",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
         }
         catch
@@ -110,7 +110,7 @@ internal static class Program
                 else
                     System.Diagnostics.Process.Start("explorer.exe", $"\"{folder}\"");
             }
-            catch { /* best-effort — user has the path in the dialog text */ }
+            catch { /* best-effort - user has the path in the dialog text */ }
         }
     }
 
@@ -142,7 +142,7 @@ internal static class Program
                     await Console.Error.WriteLineAsync("--cache-size-probe expects a comma-separated list of positive integers");
                     return 2;
                 }
-                Console.WriteLine($"CacheSizeProbe — N values: {string.Join(", ", counts)}");
+                Console.WriteLine($"CacheSizeProbe - N values: {string.Join(", ", counts)}");
                 var outputDir = Environment.CurrentDirectory;
                 var report = OneSync.Tools.CacheSizeProbe.Run(counts, outputDir);
                 Console.WriteLine($"Report written to: {report}");
@@ -199,7 +199,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            // OneSync is launched from a Start Menu / Desktop / Startup shortcut — no
+            // OneSync is launched from a Start Menu / Desktop / Startup shortcut - no
             // console is attached, so Console.Error goes nowhere a user can see. Surface
             // the real problem in a dialog with an actionable "open the file" path.
             await Console.Error.WriteLineAsync($"FATAL: Could not load config.json - {ex.Message}");
@@ -296,13 +296,13 @@ internal static class Program
                 var ttl = config.CooperativePolling.LeaseTtlSeconds;
                 var renew = config.CooperativePolling.RenewIntervalSeconds;
                 // Accept ttl >= 2× renew. At exactly 2×, missing a single renewal
-                // leaves zero margin — workable but tight. Below 2× the lease
+                // leaves zero margin - workable but tight. Below 2× the lease
                 // can plausibly expire before the leader gets a chance to renew,
                 // causing constant leadership thrash.
                 if (ttl < renew * 2)
                 {
                     logger.Error(
-                        "Cooperative polling config invalid: leaseTtlSeconds={Ttl} must be >= 2× renewIntervalSeconds={Renew}. Disabling cooperative polling for this session — fix config.json and restart.",
+                        "Cooperative polling config invalid: leaseTtlSeconds={Ttl} must be >= 2× renewIntervalSeconds={Renew}. Disabling cooperative polling for this session - fix config.json and restart.",
                         ttl, renew);
                     config.CooperativePolling.Enabled = false;
                 }
@@ -407,7 +407,7 @@ internal static class Program
             using var appCts = new CancellationTokenSource();
             quotaCache.StartBackgroundRefresh(permitted, appCts.Token);
 
-            // 5) Sync engine (Phase 4 + 5)
+            // 5) Sync engine
             syncEngine = new SyncEngine(config, auth, quotaCache, permitted, stateDir, logger);
 
             // Cooperative polling: claim leadership per drive, then start the renew+cache loop.
@@ -449,7 +449,7 @@ internal static class Program
                     }
                     catch (Exception ex)
                     {
-                        logger.Warning(ex, "Cooperative-polling setup failed for {Letter}: — falling back to per-user polling", drive.Letter);
+                        logger.Warning(ex, "Cooperative-polling setup failed for {Letter}: - falling back to per-user polling", drive.Letter);
                     }
                 }
                 coopService.WireUpDeltaPollerSkip(syncEngine.DeltaPoller);
@@ -465,7 +465,7 @@ internal static class Program
                 syncEngine.ResetMetadata();
             }
 
-            // 6) Drive mounting (Phase 2)
+            // 6) Drive mounting
             var mountedDrives = new List<DriveConfig>();
             var mountWarnings = new List<string>();
 
@@ -566,11 +566,11 @@ internal static class Program
             syncEngine.DeltaPoller.SetPauseStore(pauseStore);
             if (syncEngine.Uploader is not null) syncEngine.Uploader.SetPauseStore(pauseStore);
 
-            // If delta tokens already exist, no initial poll events fire —
+            // If delta tokens already exist, no initial poll events fire:
             // tell the widget it's safe to leave the Starting state.
             widgetVm?.NotifyReady();
 
-            // 8) Folder redirection (Phase 7) - only for drives that actually mounted.
+            // 8) Folder redirection, only for drives that actually mounted.
             // Redirecting Desktop/Documents/etc. to a drive that failed to mount would
             // throw DirectoryNotFoundException for every folder (and risk pointing the
             // user's shell folders at a drive that isn't there).
@@ -587,7 +587,7 @@ internal static class Program
                 }
             }
 
-            // 9) Tray icon + shutdown handlers (Phase 8)
+            // 9) Tray icon and shutdown handlers
             Action requestExit = () =>
             {
                 try { appCts.Cancel(); } catch { }

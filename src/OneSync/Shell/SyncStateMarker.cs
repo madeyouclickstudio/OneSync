@@ -34,7 +34,7 @@ internal static class SyncStateMarker
         // If the current overlay byte is already what we'd write, skip both
         // the file IO and the SHChangeNotify broadcast. This is the dominant
         // savings on startup: RebuildMissingPlaceholders re-marks every file
-        // as CloudOnly even though it was already CloudOnly — we don't need
+        // as CloudOnly even though it was already CloudOnly - we don't need
         // to ping Explorer thousands of times for no real change.
         var existing = Read(localPath);
         if (existing == state) return;
@@ -68,7 +68,7 @@ internal static class SyncStateMarker
         }
 
         // If we changed the marker, tell Explorer the icon may have changed
-        // so the overlay refreshes without the user pressing F5. Best-effort —
+        // so the overlay refreshes without the user pressing F5. Best-effort:
         // ShellNotifier swallows its own exceptions.
         if (succeeded)
         {

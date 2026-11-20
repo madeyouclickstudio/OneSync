@@ -11,7 +11,7 @@ namespace OneSync.State;
 ///
 /// Subsystems that should be silenced when paused (DeltaPoller, UploadWorker,
 /// the cooperative cache-write step) poll <see cref="IsPaused"/> at tick
-/// boundaries — no callbacks, no event subscription. The hot path costs one
+/// boundaries - no callbacks, no event subscription. The hot path costs one
 /// volatile read of a private timestamp; HKCU is only re-read once per tray
 /// refresh tick (3s) by <see cref="ReloadFromRegistry"/>.
 /// </summary>
@@ -33,7 +33,7 @@ internal sealed class PauseStateStore
         ReloadFromRegistry();
     }
 
-    /// <summary>True if currently paused. Volatile read — call from hot paths.</summary>
+    /// <summary>True if currently paused. Volatile read - call from hot paths.</summary>
     public bool IsPaused()
     {
         var until = _pausedUntilUtc;
@@ -87,7 +87,7 @@ internal sealed class PauseStateStore
             && loaded != IndefiniteSentinel
             && DateTime.UtcNow >= loaded)
         {
-            // Auto-resume — past timestamp means the pause window ended.
+            // Auto-resume - past timestamp means the pause window ended.
             _logger.Information("Auto-resuming sync (pause window ended at {Until:O})", loaded);
             _pausedUntilUtc = DateTime.MinValue;
             WriteToRegistry(DateTime.MinValue);
@@ -118,7 +118,7 @@ internal sealed class PauseStateStore
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Failed to read pause state from registry — defaulting to not paused");
+            _logger.Warning(ex, "Failed to read pause state from registry - defaulting to not paused");
             return DateTime.MinValue;
         }
     }
@@ -143,7 +143,7 @@ internal sealed class PauseStateStore
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Failed to write pause state to registry — pause not persisted across restart");
+            _logger.Warning(ex, "Failed to write pause state to registry - pause not persisted across restart");
         }
     }
 }

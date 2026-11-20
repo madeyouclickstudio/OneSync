@@ -14,9 +14,9 @@ namespace OneSync.Tools;
 /// <summary>
 /// Throttle-related verification scenarios. Driven by --throttle-storm
 /// &lt;scenario&gt; on the OneSync.exe CLI. Scenarios:
-///   - "burst" — TokenBucket burst test; verifies acquire timings are within
+///   - "burst" - TokenBucket burst test; verifies acquire timings are within
 ///     the theoretical envelope.
-///   - "cooldown" — placeholder. Full automated cooldown verification needs
+///   - "cooldown" - placeholder. Full automated cooldown verification needs
 ///     HttpMessageHandler injection into GraphHttpClient (see scenario body).
 /// </summary>
 internal static class ThrottleStorm
@@ -63,7 +63,7 @@ internal static class ThrottleStorm
     private static Task<int> RunBurstAsync(StringBuilder sb)
     {
         Console.WriteLine("ThrottleStorm scenario: burst (TokenBucket capacity=10, rate=10/s, 50 acquires)");
-        sb.AppendLine($"## Scenario: burst — {DateTime.UtcNow:O}");
+        sb.AppendLine($"## Scenario: burst - {DateTime.UtcNow:O}");
         sb.AppendLine();
         sb.AppendLine("Configuration: TokenBucket(capacity=10, refillPerSecond=10), burst 50 acquires.");
         sb.AppendLine();
@@ -89,7 +89,7 @@ internal static class ThrottleStorm
         sb.AppendLine($"- Instant acquires (bucket non-empty): {instantCount}");
         sb.AppendLine($"- Throttled acquires (bucket empty, waited): {throttledCount}");
         sb.AppendLine($"- Max single-acquire wait: {maxWait} ms");
-        sb.AppendLine($"- Verdict: { (totalMs >= 3500 && totalMs <= 4500 ? "✅ PASS — within ±12.5% of theoretical" : "⚠️ INVESTIGATE — outside ±12.5%") }");
+        sb.AppendLine($"- Verdict: { (totalMs >= 3500 && totalMs <= 4500 ? "✅ PASS - within ±12.5% of theoretical" : "⚠️ INVESTIGATE - outside ±12.5%") }");
         sb.AppendLine();
         Console.WriteLine($"  total={totalMs}ms instant={instantCount} throttled={throttledCount} max_wait={maxWait}ms");
         return Task.FromResult(0);
@@ -98,7 +98,7 @@ internal static class ThrottleStorm
     private static async Task<int> RunCooldownAsync(StringBuilder sb)
     {
         Console.WriteLine("ThrottleStorm scenario: cooldown (HttpMessageHandler injection)");
-        sb.AppendLine($"## Scenario: cooldown — {DateTime.UtcNow:O}");
+        sb.AppendLine($"## Scenario: cooldown - {DateTime.UtcNow:O}");
         sb.AppendLine();
         sb.AppendLine("Full automated cooldown verification needs HttpMessageHandler injection into");
         sb.AppendLine("GraphHttpClient so a fake handler can replay 429 responses. The constructor doesn't");

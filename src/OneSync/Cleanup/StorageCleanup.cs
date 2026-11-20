@@ -65,7 +65,7 @@ internal sealed class StorageCleanup
                      HasResidualDriveStorage(storageRoot))
             {
                 _logger.Information(
-                    "Previous session did not shut down cleanly — keeping existing placeholders (delta poller will reconcile)");
+                    "Previous session did not shut down cleanly - keeping existing placeholders (delta poller will reconcile)");
             }
         }
         else
@@ -136,7 +136,7 @@ internal sealed class StorageCleanup
     /// <summary>
     /// Records that the process is exiting via a graceful path (Application.Run
     /// returned, OS sent SessionEnding, etc.). Decoupled from RunLogoffCleanup
-    /// so the marker gets written BEFORE the storage wipe — Windows kills the
+    /// so the marker gets written BEFORE the storage wipe - Windows kills the
     /// process within ~20s of logoff, often before the wipe completes, and
     /// without this decoupling the marker is never written.
     /// </summary>
@@ -233,12 +233,8 @@ internal sealed class StorageCleanup
             TryDeleteFile(file);
         }
 
-        // NOTE: we deliberately do NOT delete sync_queue.db, metadata.db, or their
-        // LiteDB write-ahead-log files (*-log.db). These persist across sessions so:
-        //   - pending uploads (sync queue) can resume after an interrupted shutdown
-        //   - delta tokens + remote metadata avoid expensive full re-sync on each logon
-        // The placeholder files inside the Drives folder are wiped; metadata is enough
-        // to recreate them in seconds via RebuildMissingPlaceholders.
+        // sync_queue.db and metadata.db live outside this folder and are kept, so
+        // unsent changes resume at the next logon.
 
         _logger.Information("Storage cleanup complete (drive placeholders wiped, DB state preserved)");
     }
