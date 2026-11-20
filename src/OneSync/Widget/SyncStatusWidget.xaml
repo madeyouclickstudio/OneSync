@@ -243,6 +243,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="HeaderIconText" Text="{Binding HeaderIcon}" Style="{StaticResource Icon}"
                            FontSize="16" Height="16" Width="16" LineHeight="16"
@@ -254,6 +255,9 @@
                 </TextBlock>
                 <TextBlock Grid.Column="1" Text="{Binding HeaderText}" Style="{StaticResource Body}"
                            FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Button Grid.Column="2" Content="&#xE711;" Style="{StaticResource IconBtn}"
+                        Command="{Binding HideCommand}" ToolTip="Hide until something changes"
+                        Margin="8,-4,-6,-4" VerticalAlignment="Center"/>
             </Grid>
 
             <!-- Drive statuses (starting state) -->
@@ -271,7 +275,11 @@
                           Template="{StaticResource ScrollingItems}" Margin="-8,10,-8,0" MaxHeight="252">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Border x:Name="FileRow" CornerRadius="4" Padding="8,6" Background="Transparent">
+                        <Border x:Name="FileRow" CornerRadius="4" Padding="8,6" Background="Transparent"
+                                Cursor="Hand">
+                            <Border.InputBindings>
+                                <MouseBinding MouseAction="LeftClick" Command="{Binding OpenCommand}"/>
+                            </Border.InputBindings>
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
@@ -280,14 +288,20 @@
                                 <TextBlock x:Name="RowIcon" Text="{Binding Glyph}" Style="{StaticResource Icon}"
                                            Foreground="{StaticResource SecondaryText}" Margin="0,0,10,0"/>
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="{Binding FileName}" Style="{StaticResource Body}"
-                                               ToolTip="{Binding FileName}"/>
+                                    <Grid HorizontalAlignment="Left" ToolTip="{Binding FullPath}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding NameStem}" Style="{StaticResource Body}"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding NameExtension}" Style="{StaticResource Body}"/>
+                                    </Grid>
                                     <TextBlock Text="{Binding Detail}" Style="{StaticResource Caption}"
                                                Margin="0,1,0,0"/>
                                     <Grid Height="2" Margin="0,6,0,1"
                                           Visibility="{Binding ShowProgress, Converter={StaticResource BoolToVis}}">
                                         <Border Background="{StaticResource TrackBrush}" CornerRadius="1"/>
-                                        <Border Background="{StaticResource ProgressBrush}" CornerRadius="1"
+                                        <Border Background="{DynamicResource ProgressBrush}" CornerRadius="1"
                                                 RenderTransformOrigin="0,0.5">
                                             <Border.RenderTransform>
                                                 <ScaleTransform ScaleX="{Binding ProgressFraction}"/>
@@ -327,7 +341,11 @@
                           Template="{StaticResource ScrollingItems}" Margin="-8,10,-8,0" MaxHeight="204">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Border x:Name="ErrRow" CornerRadius="4" Padding="8,6" Background="Transparent">
+                        <Border x:Name="ErrRow" CornerRadius="4" Padding="8,6" Background="Transparent"
+                                Cursor="Hand">
+                            <Border.InputBindings>
+                                <MouseBinding MouseAction="LeftClick" Command="{Binding OpenCommand}"/>
+                            </Border.InputBindings>
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
@@ -337,13 +355,21 @@
                                 <TextBlock Text="&#xE783;" Style="{StaticResource Icon}"
                                            Foreground="{StaticResource CriticalBrush}" Margin="0,0,10,0"/>
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="{Binding FileName}" Style="{StaticResource Body}"
-                                               ToolTip="{Binding FileName}"/>
+                                    <Grid HorizontalAlignment="Left" ToolTip="{Binding FullPath}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding NameStem}" Style="{StaticResource Body}"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding NameExtension}" Style="{StaticResource Body}"/>
+                                    </Grid>
                                     <TextBlock Text="{Binding ErrorMessage}" Style="{StaticResource Caption}"
-                                               ToolTip="{Binding ErrorMessage}" Margin="0,1,0,0"/>
+                                               TextWrapping="Wrap" TextTrimming="None"
+                                               ToolTip="{Binding ErrorDetail}" Margin="0,1,0,0"/>
                                 </StackPanel>
                                 <Button Grid.Column="2" Content="Retry" Style="{StaticResource SubtleBtn}"
                                         Command="{Binding RetryCommand}" VerticalAlignment="Center"
+                                        Visibility="{Binding CanRetry, Converter={StaticResource BoolToVis}}"
                                         Margin="8,0,0,0"/>
                             </Grid>
                         </Border>

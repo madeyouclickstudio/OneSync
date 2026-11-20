@@ -1,5 +1,7 @@
 ﻿using System;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
 
@@ -17,7 +19,53 @@ internal sealed class SyncFileItem : INotifyPropertyChanged
     public string FileName
     {
         get => _fileName;
-        set { _fileName = value; OnPropertyChanged(); }
+        set
+        {
+            _fileName = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(NameStem));
+            OnPropertyChanged(nameof(NameExtension));
+        }
+    }
+
+    // Shown as two parts so a long name loses its middle, not its extension.
+    public string NameStem => Path.GetFileNameWithoutExtension(_fileName);
+    public string NameExtension => Path.GetExtension(_fileName);
+
+    /// <summary>Drive-letter path of the file, like H:\Work\notes.docx.</summary>
+    public string FullPath { get; init; } = string.Empty;
+
+    /// <summary>The folder the file is in, or the drive for files at the top.</summary>
+    public string Location
+    {
+        get
+        {
+            var dir = Path.GetDirectoryName(FullPath);
+            if (string.IsNullOrEmpty(dir)) return "";
+            var name = Path.GetFileName(dir);
+            return string.IsNullOrEmpty(name) ? dir.TrimEnd('\\') : name;
+        }
+    }
+
+    /// <summary>False for failures a retry can't fix, like no permission or too big.</summary>
+    public bool CanRetry { get; init; } = true;
+
+    /// <summary>The underlying error, for the tooltip.</summary>
+    public string? ErrorDetail { get; init; }
+
+    public ICommand OpenCommand => new RelayCommand(Open);
+
+    // Show the file in Explorer, or its folder if the file has gone.
+    private void Open()
+    {
+        try
+        {
+            if (File.Exists(FullPath))
+                Process.Start("explorer.exe", $"/select,\"{FullPath}\"");
+            else if (Directory.Exists(Path.GetDirectoryName(FullPath)))
+                Process.Start("explorer.exe", $"\"{Path.GetDirectoryName(FullPath)}\"");
+        }
+        catch { }
     }
 
     public double Progress
@@ -78,8 +126,16 @@ internal sealed class SyncFileItem : INotifyPropertyChanged
             "Renaming" => "Renamed",
             _ => "Uploaded",
         },
-        _ => Verb ?? (_progress > 0 ? $"Uploading, {_progress:0}%" : "Uploading"),
+        _ => Verb switch
+        {
+            "Deleting" => With("Deleting from"),
+            "Renaming" => With("Renaming in"),
+            _ => With("Uploading to") + (_progress > 0 ? $", {_progress:0}%" : ""),
+        },
     };
+
+    private string With(string what) =>
+        string.IsNullOrEmpty(Location) ? what.Split(' ')[0] : $"{what} {Location}";
 
     /// <summary>Only uploads have real progress to show.</summary>
     public bool ShowProgress => Verb == null && State == SyncFileState.Syncing;

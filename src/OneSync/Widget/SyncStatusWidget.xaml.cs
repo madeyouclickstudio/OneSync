@@ -87,6 +87,8 @@ public partial class SyncStatusWidget : Window
         {
             var color = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_vm.AccentHex);
             HeaderIconText.Foreground = new SolidColorBrush(color);
+            // Progress bars follow the header, so they're the accent while syncing.
+            Resources["ProgressBrush"] = new SolidColorBrush(color);
         }
         catch { }
     }
