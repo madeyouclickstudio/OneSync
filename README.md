@@ -38,7 +38,7 @@ Most of these came from running similar tools in production at a single school a
 
 - **Accurate free-space in File Explorer.** Right-clicking a drive shows the real OneDrive / SharePoint quota and remaining bytes (refreshed periodically via Graph), not a synthetic placeholder. Users actually know when they're about to run out.
 - **Image thumbnail previews.** JPG / PNG / HEIC thumbnails render in Explorer the same way they do on a local disk, without the user having to open the file first.
-- **Live upload / sync status widget.** A floating tray modal shows in-progress uploads, deletes, and conflict resolutions with percentage and filename, so users can tell at a glance whether their save has actually made it to the cloud.
+- **Live upload / sync status widget.** A floating tray modal shows in-progress uploads, deletes, and conflict resolutions with percentage and filename, so users can tell at a glance whether their save has actually made it to the cloud. It follows Windows light or dark mode.
 - **Recycle bin access.** The tray's Recycle Bin view shows recently-deleted files from this client for visibility — clicking Restore on anything (recent or older) opens the OneDrive / SharePoint recycle bin in your browser, where the actual restore happens.
 - **Recycle-bin desktop icon stays clean.** The OneDrive Recycle Bin folder is excluded from the delta sync, so the local desktop Recycle Bin icon never flips to the "items present" state because of cloud-side deletes the user doesn't care about.
 - **Cross-machine pending-upload notification.** If a staff member leaves work-in-progress on one PC and signs into another, a tray balloon on the new machine tells them which files are still pending on which device.
