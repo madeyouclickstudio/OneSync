@@ -168,7 +168,8 @@
       "~*.tmp",
       "__autosave_*",
       "WRL*.tmp",
-      "*.bak.tmp"
+      "*.bak.tmp",
+      "Default.rdp"
     ],
     "quotaRefreshIntervalSeconds": 300,
     "deltaQueryIntervalSeconds": 300,

@@ -559,6 +559,7 @@ internal static class Program
                 syncEngine.Uploader.UploadProgress += widgetVm.OnUploadProgress;
                 syncEngine.Uploader.UploadCompleted += widgetVm.OnUploadCompleted;
                 syncEngine.Uploader.UploadFailed += widgetVm.OnUploadFailed;
+                syncEngine.Uploader.UploadEnded += widgetVm.OnUploadEnded;
                 syncEngine.Uploader.SyncOpStarted += widgetVm.OnSyncOpStarted;
                 syncEngine.Uploader.SyncOpCompleted += widgetVm.OnSyncOpCompleted;
             }

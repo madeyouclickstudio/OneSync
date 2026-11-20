@@ -16,9 +16,9 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     private readonly Dispatcher _dispatcher;
     private SyncQueue? _queue;
     private string _headerText = "Loading your files…";
-    private string _headerIcon = "↻";
+    private string _headerIcon = "";
     private WidgetState _state = WidgetState.Starting;
-    private string _accentHex = "#4CAF50";
+    private string _accentHex = "#6CCB5F";
     private bool _isThrottled;
     private string? _throttleMessage;
     private int _drivesLoadingCount;
@@ -244,6 +244,20 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
         });
     }
 
+    /// <summary>The uploader is done with this file for now. A row still showing as
+    /// in progress means it was skipped or put back for a retry, so drop it.</summary>
+    public void OnUploadEnded(DriveConfig drive, string relPath)
+    {
+        _dispatcher.BeginInvoke(() =>
+        {
+            var item = SyncingFiles.FirstOrDefault(f =>
+                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            if (item == null || item.State != SyncFileState.Syncing) return;
+            SyncingFiles.Remove(item);
+            UpdateState();
+        });
+    }
+
     public void OnSyncOpStarted(DriveConfig drive, string relPath, string verb)
     {
         _dispatcher.BeginInvoke(() =>
@@ -255,8 +269,8 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             if (existing != null) return;
             SyncingFiles.Add(new SyncFileItem
             {
-                FileName = $"{verb} {fileName}",
-                Progress = 100,
+                FileName = fileName,
+                Verb = verb,
                 State = SyncFileState.Syncing,
                 DriveConfigId = drive.ConfigId,
                 RelativePath = relPath,
@@ -403,9 +417,9 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         if (_state == WidgetState.Starting && _drivesLoadingCount > 0)
         {
-            HeaderIcon = "↻";
+            HeaderIcon = "";
             HeaderText = "Loading your files…";
-            AccentHex = "#4CAF50";
+            AccentHex = "#6CCB5F";
             ShowWidget();
             return;
         }
@@ -416,41 +430,41 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
         if (_isThrottled)
         {
             State = WidgetState.Syncing;
-            HeaderIcon = "⏸";
+            HeaderIcon = "";
             HeaderText = _throttleMessage ?? "Sync paused";
-            AccentHex = "#FFA726";
+            AccentHex = "#FFC83D";
             ShowWidget();
         }
         else if (hasSyncing && hasErrors)
         {
             State = WidgetState.Mixed;
-            HeaderIcon = "↻";
+            HeaderIcon = "";
             HeaderText = $"Syncing {SyncingFiles.Count} file{(SyncingFiles.Count == 1 ? "" : "s")}…";
-            AccentHex = "#FFA726";
+            AccentHex = "#FFC83D";
             ShowWidget();
         }
         else if (hasSyncing)
         {
             State = WidgetState.Syncing;
-            HeaderIcon = "↻";
+            HeaderIcon = "";
             HeaderText = $"Syncing {SyncingFiles.Count} file{(SyncingFiles.Count == 1 ? "" : "s")}…";
-            AccentHex = "#FFA726";
+            AccentHex = "#FFC83D";
             ShowWidget();
         }
         else if (hasErrors)
         {
             State = WidgetState.Error;
-            HeaderIcon = "✕";
-            HeaderText = $"Sync Errors ({ErrorFiles.Count})";
-            AccentHex = "#EF5350";
+            HeaderIcon = "";
+            HeaderText = $"{ErrorFiles.Count} file{(ErrorFiles.Count == 1 ? "" : "s")} couldn't sync";
+            AccentHex = "#FF99A4";
             ShowWidget();
         }
         else
         {
             State = WidgetState.Idle;
-            HeaderIcon = "✓";
-            HeaderText = "All Synced";
-            AccentHex = "#4CAF50";
+            HeaderIcon = "";
+            HeaderText = "All synced";
+            AccentHex = "#6CCB5F";
             ScheduleAutoHide();
         }
     }

@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using Microsoft.Win32;
 
 namespace OneSync.Widget;
@@ -37,6 +38,8 @@ public partial class SyncStatusWidget : Window
         {
             if (e.PropertyName == nameof(SyncStatusViewModel.AccentHex))
                 UpdateAccentColor();
+            else if (e.PropertyName == nameof(SyncStatusViewModel.HeaderIcon))
+                UpdateSpin();
             else if (e.PropertyName == nameof(SyncStatusViewModel.IsVisible))
                 UpdateVisibility();
         };
@@ -48,6 +51,7 @@ public partial class SyncStatusWidget : Window
         ApplyWindowStyles();
         AcrylicHelper.Apply(new WindowInteropHelper(this).Handle);
         UpdateAccentColor();
+        UpdateSpin();
     }
 
     private void ApplyWindowStyles()
@@ -82,9 +86,35 @@ public partial class SyncStatusWidget : Window
         try
         {
             var color = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_vm.AccentHex);
-            AccentBar.Background = new SolidColorBrush(color);
+            HeaderIconText.Foreground = new SolidColorBrush(color);
         }
         catch { }
+    }
+
+    private const string SyncGlyph = "";
+    private bool _spinning;
+
+    // Turn the sync icon slowly while there's work going on. Skipped when the
+    // user has turned animations off in Windows.
+    private void UpdateSpin()
+    {
+        bool spin = _vm.HeaderIcon == SyncGlyph && SystemParameters.ClientAreaAnimation;
+        if (spin == _spinning) return;
+        _spinning = spin;
+
+        if (spin)
+        {
+            var turn = new DoubleAnimation(0, 360, TimeSpan.FromSeconds(1.6))
+            {
+                RepeatBehavior = RepeatBehavior.Forever,
+            };
+            HeaderSpin.BeginAnimation(RotateTransform.AngleProperty, turn);
+        }
+        else
+        {
+            HeaderSpin.BeginAnimation(RotateTransform.AngleProperty, null);
+            HeaderSpin.Angle = 0;
+        }
     }
 
     private void UpdateVisibility()

@@ -146,7 +146,8 @@ internal sealed class SyncSettings
     {
         "*.tmp", "*.~tmp", "~$*", "Thumbs.db", "desktop.ini", ".ds_store", "*.lnk",
         "*.crdownload", "*.part", "*.partial", "*.crswap",
-        "*.swp", "*.swo", "*.lock", "*.lck", "~*.tmp", "__autosave_*", "WRL*.tmp", "*.bak.tmp"
+        "*.swp", "*.swo", "*.lock", "*.lck", "~*.tmp", "__autosave_*", "WRL*.tmp", "*.bak.tmp",
+        "Default.rdp"
     };
     [JsonPropertyName("quotaRefreshIntervalSeconds")] public int QuotaRefreshIntervalSeconds { get; set; } = 300;
     // 60s keeps remote-change latency at ~1 min worst case. At single-user scale the

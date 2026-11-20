@@ -50,6 +50,10 @@ internal sealed class UploadWorker
     /// <summary>Fires when an upload finally fails (after retries are exhausted).</summary>
     public event Action<DriveConfig, string, string>? UploadFailed;
 
+    /// <summary>Fires when we're done with an upload op for now, whatever happened:
+    /// sent, skipped, failed, or put back for a retry later.</summary>
+    public event Action<DriveConfig, string>? UploadEnded;
+
     /// <summary>Fires when a non-upload sync operation (delete/rename) begins.</summary>
     public event Action<DriveConfig, string, string>? SyncOpStarted;
 
@@ -252,6 +256,11 @@ internal sealed class UploadWorker
                     op.RetryCount + 1, backoff, op);
                 _queue.MarkRetry(op, backoff, ex.Message);
             }
+        }
+        finally
+        {
+            if (op.Type == SyncOpType.Upload)
+                try { UploadEnded?.Invoke(drive, op.RelativePath); } catch { }
         }
     }
 
