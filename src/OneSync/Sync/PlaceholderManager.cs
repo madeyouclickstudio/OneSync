@@ -54,23 +54,23 @@ internal sealed class PlaceholderManager
     /// change for a local path.</summary>
     public Func<string, bool>? LocalChangePending { get; set; }
 
-    /// <summary>True if nothing is at this path locally and a change to it (or a
-    /// folder above it) hasn't been picked up by the watcher yet.</summary>
+    /// <summary>True if this path is missing locally and the watcher hasn't yet
+    /// picked up the delete or move behind it, of the item itself or of a missing
+    /// folder above it. A folder that exists, even one just made, doesn't count.</summary>
     public bool WaitingOnLocalChange(DriveConfig drive, string relativePath)
     {
         var pending = LocalChangePending;
         if (pending is null) return false;
 
-        var local = LocalPathFor(drive, relativePath);
-        if (File.Exists(local) || Directory.Exists(local)) return false;
-
         var p = relativePath;
-        while (true)
+        while (!string.IsNullOrEmpty(p) && p != "/")
         {
-            if (pending(LocalPathFor(drive, p))) return true;
-            if (p == "/" || string.IsNullOrEmpty(p)) return false;
+            var local = LocalPathFor(drive, p);
+            if (File.Exists(local) || Directory.Exists(local)) return false;
+            if (pending(local)) return true;
             p = PathUtil.ParentOf(p);
         }
+        return false;
     }
 
     /// <summary>True for folders whose contents we keep up to date: the drive root
