@@ -28,7 +28,7 @@
 
   <Bundle Name="OneSync"
           Manufacturer="madeyouclick studio"
-          Version="1.4.1.0"
+          Version="1.4.2.0"
           UpgradeCode="A5F7C231-9E14-4C90-8B0D-3F5E2A1D8B40"
           IconSourceFile="$(var.SourceDir)\src\OneSync.Installer\stage\icon.ico">
 

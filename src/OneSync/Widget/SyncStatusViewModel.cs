@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using OneSync.Config;
@@ -16,19 +18,38 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     private readonly Dispatcher _dispatcher;
     private SyncQueue? _queue;
     private string _headerText = "Loading your files…";
-    private string _headerIcon = "↻";
+    private string _headerIcon = "";
     private WidgetState _state = WidgetState.Starting;
-    private string _accentHex = "#4CAF50";
+    private string _accentHex = "#6CCB5F";
     private bool _isThrottled;
     private string? _throttleMessage;
     private int _drivesLoadingCount;
     private bool _isVisible = true;
     private DispatcherTimer? _autoHideTimer;
+    private bool _dismissed;
+    private readonly Dictionary<string, string> _letters = new();
 
     public SyncStatusViewModel(Dispatcher dispatcher)
     {
         _dispatcher = dispatcher;
         RetryAllCommand = new RelayCommand(OnRetryAll);
+        HideCommand = new RelayCommand(Hide);
+    }
+
+    public System.Windows.Input.ICommand HideCommand { get; }
+
+    // Hidden by hand: stay out of the way until something new happens.
+    private void Hide()
+    {
+        _dismissed = true;
+        _autoHideTimer?.Stop();
+        _autoHideTimer = null;
+        IsVisible = false;
+    }
+
+    public void SetDrives(IEnumerable<DriveConfig> drives)
+    {
+        foreach (var d in drives) Remember(d);
     }
 
     public bool IsVisible
@@ -150,12 +171,37 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
         });
     }
 
+    private SyncFileItem NewItem(string configId, string relPath, SyncFileState state,
+        string? verb = null, string? error = null)
+    {
+        var rel = relPath.Replace('/', '\\').TrimStart('\\');
+        var full = _letters.TryGetValue(configId, out var letter) ? $"{letter}:\\{rel}" : "";
+        var (text, canRetry) = state == SyncFileState.Error
+            ? SyncErrorText.Describe(error) : ("", true);
+        var item = new SyncFileItem
+        {
+            FileName = System.IO.Path.GetFileName(rel),
+            FullPath = full,
+            Verb = verb,
+            State = state,
+            ErrorMessage = state == SyncFileState.Error ? text : null,
+            ErrorDetail = error,
+            CanRetry = canRetry,
+            DriveConfigId = configId,
+            RelativePath = relPath,
+        };
+        if (state == SyncFileState.Error)
+            item.RetryCommand = new RelayCommand(() => OnRetrySingle(item));
+        return item;
+    }
+
+    private void Remember(DriveConfig drive) => _letters[drive.ConfigId] = drive.Letter.TrimEnd(':');
+
     public void OnUploadStarted(DriveConfig drive, string relPath, long size)
     {
         _dispatcher.BeginInvoke(() =>
         {
-            var fileName = System.IO.Path.GetFileName(
-                relPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
+            Remember(drive);
             var existing = SyncingFiles.FirstOrDefault(f =>
                 f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
             if (existing != null)
@@ -164,14 +210,8 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
                 existing.State = SyncFileState.Syncing;
                 return;
             }
-            SyncingFiles.Add(new SyncFileItem
-            {
-                FileName = fileName,
-                Progress = 0,
-                State = SyncFileState.Syncing,
-                DriveConfigId = drive.ConfigId,
-                RelativePath = relPath,
-            });
+            _dismissed = false;
+            SyncingFiles.Add(NewItem(drive.ConfigId, relPath, SyncFileState.Syncing));
             UpdateState();
         });
     }
@@ -218,28 +258,28 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             if (syncing != null)
                 SyncingFiles.Remove(syncing);
 
-            var fileName = System.IO.Path.GetFileName(
-                relPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
-
+            Remember(drive);
             var existing = ErrorFiles.FirstOrDefault(f =>
                 f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
-            if (existing != null)
-            {
-                existing.ErrorMessage = error;
-                return;
-            }
+            if (existing != null) ErrorFiles.Remove(existing);
 
-            var errorItem = new SyncFileItem
-            {
-                FileName = fileName,
-                State = SyncFileState.Error,
-                ErrorMessage = error,
-                DriveConfigId = drive.ConfigId,
-                RelativePath = relPath,
-            };
-            errorItem.RetryCommand = new RelayCommand(() => OnRetrySingle(errorItem));
-            ErrorFiles.Add(errorItem);
+            _dismissed = false;
+            ErrorFiles.Add(NewItem(drive.ConfigId, relPath, SyncFileState.Error, error: error));
             OnPropertyChanged(nameof(HasErrors));
+            UpdateState();
+        });
+    }
+
+    /// <summary>The uploader is done with this op for now. A row still showing as
+    /// in progress means it failed, was skipped or was put back for a retry, so drop it.</summary>
+    public void OnSyncOpEnded(DriveConfig drive, string relPath)
+    {
+        _dispatcher.BeginInvoke(() =>
+        {
+            var item = SyncingFiles.FirstOrDefault(f =>
+                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            if (item == null || item.State != SyncFileState.Syncing) return;
+            SyncingFiles.Remove(item);
             UpdateState();
         });
     }
@@ -248,19 +288,12 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         _dispatcher.BeginInvoke(() =>
         {
-            var fileName = System.IO.Path.GetFileName(
-                relPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
+            Remember(drive);
             var existing = SyncingFiles.FirstOrDefault(f =>
                 f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
             if (existing != null) return;
-            SyncingFiles.Add(new SyncFileItem
-            {
-                FileName = $"{verb} {fileName}",
-                Progress = 100,
-                State = SyncFileState.Syncing,
-                DriveConfigId = drive.ConfigId,
-                RelativePath = relPath,
-            });
+            _dismissed = false;
+            SyncingFiles.Add(NewItem(drive.ConfigId, relPath, SyncFileState.Syncing, verb));
             UpdateState();
         });
     }
@@ -343,8 +376,9 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             Message = message,
             IsPersistent = persistent,
         };
-        toast.DismissCommand = new RelayCommand(() => Toasts.Remove(toast));
+        toast.DismissCommand = new RelayCommand(() => { Toasts.Remove(toast); UpdateState(); });
         Toasts.Add(toast);
+        _dismissed = false;
         ShowWidget();
 
         if (!persistent)
@@ -354,6 +388,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             {
                 timer.Stop();
                 Toasts.Remove(toast);
+                UpdateState();
             };
             timer.Start();
         }
@@ -381,20 +416,10 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
         var failed = _queue.GetFailed(max: 50);
         foreach (var op in failed)
         {
-            var fileName = System.IO.Path.GetFileName(
-                op.RelativePath.Replace('/', System.IO.Path.DirectorySeparatorChar));
             if (ErrorFiles.Any(f => f.DriveConfigId == op.DriveConfigId && f.RelativePath == op.RelativePath))
                 continue;
-            var errorItem = new SyncFileItem
-            {
-                FileName = fileName,
-                State = SyncFileState.Error,
-                ErrorMessage = op.ErrorMessage ?? "Upload failed",
-                DriveConfigId = op.DriveConfigId,
-                RelativePath = op.RelativePath,
-            };
-            errorItem.RetryCommand = new RelayCommand(() => OnRetrySingle(errorItem));
-            ErrorFiles.Add(errorItem);
+            ErrorFiles.Add(NewItem(op.DriveConfigId, op.RelativePath, SyncFileState.Error,
+                error: op.ErrorMessage ?? "Upload failed"));
         }
         OnPropertyChanged(nameof(HasErrors));
     }
@@ -403,9 +428,9 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         if (_state == WidgetState.Starting && _drivesLoadingCount > 0)
         {
-            HeaderIcon = "↻";
+            HeaderIcon = "";
             HeaderText = "Loading your files…";
-            AccentHex = "#4CAF50";
+            AccentHex = "#6CCB5F";
             ShowWidget();
             return;
         }
@@ -416,50 +441,82 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
         if (_isThrottled)
         {
             State = WidgetState.Syncing;
-            HeaderIcon = "⏸";
+            HeaderIcon = "";
             HeaderText = _throttleMessage ?? "Sync paused";
-            AccentHex = "#FFA726";
+            AccentHex = "#FFC83D";
             ShowWidget();
         }
         else if (hasSyncing && hasErrors)
         {
             State = WidgetState.Mixed;
-            HeaderIcon = "↻";
-            HeaderText = $"Syncing {SyncingFiles.Count} file{(SyncingFiles.Count == 1 ? "" : "s")}…";
-            AccentHex = "#FFA726";
+            HeaderIcon = "";
+            HeaderText = $"{SyncingText()} · {ErrorFiles.Count} couldn't sync";
+            AccentHex = SystemAccent();
             ShowWidget();
         }
         else if (hasSyncing)
         {
             State = WidgetState.Syncing;
-            HeaderIcon = "↻";
-            HeaderText = $"Syncing {SyncingFiles.Count} file{(SyncingFiles.Count == 1 ? "" : "s")}…";
-            AccentHex = "#FFA726";
+            HeaderIcon = "";
+            HeaderText = SyncingText();
+            AccentHex = SystemAccent();
             ShowWidget();
         }
         else if (hasErrors)
         {
             State = WidgetState.Error;
-            HeaderIcon = "✕";
-            HeaderText = $"Sync Errors ({ErrorFiles.Count})";
-            AccentHex = "#EF5350";
+            HeaderIcon = "";
+            HeaderText = $"{ErrorFiles.Count} file{(ErrorFiles.Count == 1 ? "" : "s")} couldn't sync";
+            AccentHex = "#FF99A4";
             ShowWidget();
         }
         else
         {
             State = WidgetState.Idle;
-            HeaderIcon = "✓";
-            HeaderText = "All Synced";
-            AccentHex = "#4CAF50";
+            HeaderIcon = "";
+            HeaderText = "All synced";
+            AccentHex = "#6CCB5F";
             ScheduleAutoHide();
         }
+    }
+
+    // The rows on screen are only what's in flight; the queue knows what's still to come.
+    private string SyncingText()
+    {
+        int n = SyncingFiles.Count(f => f.State == SyncFileState.Syncing);
+        try { n += _queue?.CountPending() ?? 0; } catch { }
+        n = Math.Max(n, 1);
+        return $"Syncing {n} file{(n == 1 ? "" : "s")}…";
+    }
+
+    // Windows' accent colour, lightened for a dark panel, as the taskbar does.
+    private static string SystemAccent()
+    {
+        try
+        {
+            var c = new Windows.UI.ViewManagement.UISettings()
+                .GetColorValue(Windows.UI.ViewManagement.UIColorType.AccentLight2);
+            return $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+        }
+        catch { return "#99EBFF"; }
     }
 
     private void ShowWidget()
     {
         _autoHideTimer?.Stop();
         _autoHideTimer = null;
+        if (_dismissed || SomeoneIsPresenting()) return;
         IsVisible = true;
+    }
+
+    [DllImport("shell32.dll")]
+    private static extern int SHQueryUserNotificationState(out int state);
+
+    // Busy (full screen), D3D full screen or presentation mode: don't pop up over it.
+    private static bool SomeoneIsPresenting()
+    {
+        try { return SHQueryUserNotificationState(out var s) == 0 && s is 2 or 3 or 4; }
+        catch { return false; }
     }
 
     private void ScheduleAutoHide()

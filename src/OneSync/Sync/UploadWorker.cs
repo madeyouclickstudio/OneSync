@@ -50,6 +50,10 @@ internal sealed class UploadWorker
     /// <summary>Fires when an upload finally fails (after retries are exhausted).</summary>
     public event Action<DriveConfig, string, string>? UploadFailed;
 
+    /// <summary>Fires when we're done with an op for now, whatever happened:
+    /// done, skipped, failed, or put back for a retry later.</summary>
+    public event Action<DriveConfig, string>? SyncOpEnded;
+
     /// <summary>Fires when a non-upload sync operation (delete/rename) begins.</summary>
     public event Action<DriveConfig, string, string>? SyncOpStarted;
 
@@ -190,13 +194,13 @@ internal sealed class UploadWorker
                     break;
                 case SyncOpType.RemoteDelete:
                     try { SyncOpStarted?.Invoke(drive, op.RelativePath, "Deleting"); } catch { }
-                    try { await RemoteDeleteAsync(op, drive, ct); }
-                    finally { try { SyncOpCompleted?.Invoke(drive, op.RelativePath, "Deleting"); } catch { } }
+                    await RemoteDeleteAsync(op, drive, ct);
+                    try { SyncOpCompleted?.Invoke(drive, op.RelativePath, "Deleting"); } catch { }
                     break;
                 case SyncOpType.RemoteRename:
                     try { SyncOpStarted?.Invoke(drive, op.RelativePath, "Renaming"); } catch { }
-                    try { await RemoteRenameAsync(op, drive, ct); }
-                    finally { try { SyncOpCompleted?.Invoke(drive, op.RelativePath, "Renaming"); } catch { } }
+                    await RemoteRenameAsync(op, drive, ct);
+                    try { SyncOpCompleted?.Invoke(drive, op.RelativePath, "Renaming"); } catch { }
                     break;
                 default:
                     _queue.MarkFailed(op, $"unsupported op type: {op.Type}");
@@ -252,6 +256,10 @@ internal sealed class UploadWorker
                     op.RetryCount + 1, backoff, op);
                 _queue.MarkRetry(op, backoff, ex.Message);
             }
+        }
+        finally
+        {
+            try { SyncOpEnded?.Invoke(drive, op.RelativePath); } catch { }
         }
     }
 
