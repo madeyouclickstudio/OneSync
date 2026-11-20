@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Windows applies this at every sign-in (see the DefaultAssociationsConfiguration
+     policy the installer sets), so Office files always open through OneSync. -->
+<DefaultAssociations>
+  <Association Identifier=".doc" ProgId="OneSync.OfficeRedirect.Docx" ApplicationName="OneSync" />
+  <Association Identifier=".docx" ProgId="OneSync.OfficeRedirect.Docx" ApplicationName="OneSync" />
+  <Association Identifier=".docm" ProgId="OneSync.OfficeRedirect.Docx" ApplicationName="OneSync" />
+  <Association Identifier=".xls" ProgId="OneSync.OfficeRedirect.Xlsx" ApplicationName="OneSync" />
+  <Association Identifier=".xlsx" ProgId="OneSync.OfficeRedirect.Xlsx" ApplicationName="OneSync" />
+  <Association Identifier=".xlsm" ProgId="OneSync.OfficeRedirect.Xlsx" ApplicationName="OneSync" />
+  <Association Identifier=".ppt" ProgId="OneSync.OfficeRedirect.Pptx" ApplicationName="OneSync" />
+  <Association Identifier=".pptx" ProgId="OneSync.OfficeRedirect.Pptx" ApplicationName="OneSync" />
+  <Association Identifier=".pptm" ProgId="OneSync.OfficeRedirect.Pptx" ApplicationName="OneSync" />
+</DefaultAssociations>
