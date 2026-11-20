@@ -197,13 +197,37 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
 
     private void Remember(DriveConfig drive) => _letters[drive.ConfigId] = drive.Letter.TrimEnd(':');
 
+    // Rows on their way out don't count, so a file that starts again gets a new row.
+    private SyncFileItem? FindRow(DriveConfig drive, string relPath) =>
+        SyncingFiles.FirstOrDefault(f =>
+            !f.IsLeaving && f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+
+    // Let the row fade out before it goes. The widget does the fade.
+    private void RemoveRow(SyncFileItem item)
+    {
+        if (!System.Windows.SystemParameters.ClientAreaAnimation)
+        {
+            SyncingFiles.Remove(item);
+            UpdateState();
+            return;
+        }
+        item.IsLeaving = true;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(170) };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            SyncingFiles.Remove(item);
+            UpdateState();
+        };
+        timer.Start();
+    }
+
     public void OnUploadStarted(DriveConfig drive, string relPath, long size)
     {
         _dispatcher.BeginInvoke(() =>
         {
             Remember(drive);
-            var existing = SyncingFiles.FirstOrDefault(f =>
-                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            var existing = FindRow(drive, relPath);
             if (existing != null)
             {
                 existing.Progress = 0;
@@ -220,8 +244,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         _dispatcher.BeginInvoke(() =>
         {
-            var item = SyncingFiles.FirstOrDefault(f =>
-                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            var item = FindRow(drive, relPath);
             if (item == null) return;
             item.Progress = total > 0 ? (sent * 100.0 / total) : 0;
         });
@@ -231,8 +254,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         _dispatcher.BeginInvoke(() =>
         {
-            var item = SyncingFiles.FirstOrDefault(f =>
-                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            var item = FindRow(drive, relPath);
             if (item == null) return;
 
             item.State = SyncFileState.Completed;
@@ -242,8 +264,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
             timer.Tick += (_, _) =>
             {
                 timer.Stop();
-                SyncingFiles.Remove(item);
-                UpdateState();
+                if (item.State == SyncFileState.Completed) RemoveRow(item);
             };
             timer.Start();
         });
@@ -253,8 +274,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         _dispatcher.BeginInvoke(() =>
         {
-            var syncing = SyncingFiles.FirstOrDefault(f =>
-                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            var syncing = FindRow(drive, relPath);
             if (syncing != null)
                 SyncingFiles.Remove(syncing);
 
@@ -276,11 +296,9 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         _dispatcher.BeginInvoke(() =>
         {
-            var item = SyncingFiles.FirstOrDefault(f =>
-                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            var item = FindRow(drive, relPath);
             if (item == null || item.State != SyncFileState.Syncing) return;
-            SyncingFiles.Remove(item);
-            UpdateState();
+            RemoveRow(item);
         });
     }
 
@@ -289,8 +307,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
         _dispatcher.BeginInvoke(() =>
         {
             Remember(drive);
-            var existing = SyncingFiles.FirstOrDefault(f =>
-                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            var existing = FindRow(drive, relPath);
             if (existing != null) return;
             _dismissed = false;
             SyncingFiles.Add(NewItem(drive.ConfigId, relPath, SyncFileState.Syncing, verb));
@@ -302,16 +319,14 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     {
         _dispatcher.BeginInvoke(() =>
         {
-            var item = SyncingFiles.FirstOrDefault(f =>
-                f.DriveConfigId == drive.ConfigId && f.RelativePath == relPath);
+            var item = FindRow(drive, relPath);
             if (item == null) return;
             item.State = SyncFileState.Completed;
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
             timer.Tick += (_, _) =>
             {
                 timer.Stop();
-                SyncingFiles.Remove(item);
-                UpdateState();
+                if (item.State == SyncFileState.Completed) RemoveRow(item);
             };
             timer.Start();
         });
@@ -483,7 +498,7 @@ internal sealed class SyncStatusViewModel : INotifyPropertyChanged
     // The rows on screen are only what's in flight; the queue knows what's still to come.
     private string SyncingText()
     {
-        int n = SyncingFiles.Count(f => f.State == SyncFileState.Syncing);
+        int n = SyncingFiles.Count(f => f.State == SyncFileState.Syncing && !f.IsLeaving);
         try { n += _queue?.CountPending() ?? 0; } catch { }
         n = Math.Max(n, 1);
         return $"Syncing {n} file{(n == 1 ? "" : "s")}…";

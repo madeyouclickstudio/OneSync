@@ -82,6 +82,15 @@ internal sealed class SyncFileItem : INotifyPropertyChanged
 
     public double ProgressFraction => _progress / 100.0;
 
+    private bool _isLeaving;
+
+    /// <summary>Set just before the row is removed, so it can fade out.</summary>
+    public bool IsLeaving
+    {
+        get => _isLeaving;
+        set { _isLeaving = value; OnPropertyChanged(); }
+    }
+
     public SyncFileState State
     {
         get => _state;

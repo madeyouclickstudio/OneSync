@@ -210,7 +210,7 @@
             <SolidColorBrush x:Name="WindowBg" Color="#B3202020"/>
         </Border.Background>
 
-        <StackPanel Margin="16,14,16,14">
+        <StackPanel x:Name="Body" Margin="16,14,16,14" VerticalAlignment="Top">
 
             <!-- Toasts -->
             <ItemsControl ItemsSource="{Binding Toasts}" Style="{StaticResource HideWhenEmpty}" Margin="0,0,0,12">
@@ -273,12 +273,12 @@
             </ItemsControl>
 
             <!-- Syncing files -->
-            <ItemsControl ItemsSource="{Binding SyncingFiles}" Style="{StaticResource HideWhenEmpty}"
+            <ItemsControl x:Name="FileList" ItemsSource="{Binding SyncingFiles}" Style="{StaticResource HideWhenEmpty}"
                           Template="{StaticResource ScrollingItems}" Margin="-8,10,-8,0" MaxHeight="252">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <Border x:Name="FileRow" CornerRadius="4" Padding="8,6" Background="Transparent"
-                                Loaded="FileRow_Loaded"
+                                Loaded="FileRow_Loaded" Unloaded="FileRow_Unloaded"
                                 Cursor="Hand">
                             <Border.InputBindings>
                                 <MouseBinding MouseAction="LeftClick" Command="{Binding OpenCommand}"/>

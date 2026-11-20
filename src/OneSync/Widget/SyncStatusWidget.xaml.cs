@@ -1,9 +1,12 @@
 ﻿using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace OneSync.Widget;
@@ -31,7 +34,9 @@ public partial class SyncStatusWidget : Window
         InitializeComponent();
 
         Loaded += OnLoaded;
-        SizeChanged += (_, _) => PositionBottomRight();
+        Body.SizeChanged += Body_SizeChanged;
+        SizeChanged += OnSizeChanged;
+        _shrinkTimer.Tick += (_, _) => ReleaseHeight();
         SystemEvents.DisplaySettingsChanged += (_, _) => Dispatcher.BeginInvoke(PositionBottomRight);
 
         _vm.PropertyChanged += (_, e) =>
@@ -118,12 +123,57 @@ public partial class SyncStatusWidget : Window
         }
     }
 
-    // New rows fade in, unless the user has turned animations off in Windows.
+    // The window sits on the bottom edge, so every size change moves its top.
+    // It grows straight away but only shrinks once the list has been settled
+    // for a moment, so rows coming and going during a sync don't make it jump.
+    private readonly DispatcherTimer _shrinkTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+
+    private void OnSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.HeightChanged && e.NewSize.Height > e.PreviousSize.Height && IsVisible)
+            MinHeight = e.NewSize.Height;
+        PositionBottomRight();
+    }
+
+    private void Body_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (!e.HeightChanged || e.NewSize.Height >= e.PreviousSize.Height) return;
+        _shrinkTimer.Stop();
+        _shrinkTimer.Start();
+    }
+
+    private void ReleaseHeight()
+    {
+        _shrinkTimer.Stop();
+        MinHeight = 0;
+    }
+
+    // New rows fade in, and fade out when they're about to go, unless the user
+    // has turned animations off in Windows.
     private void FileRow_Loaded(object sender, RoutedEventArgs e)
     {
+        var row = (FrameworkElement)sender;
+        if (row.DataContext is SyncFileItem item)
+            item.PropertyChanged += Item_PropertyChanged;
+
         if (!SystemParameters.ClientAreaAnimation) return;
-        ((UIElement)sender).BeginAnimation(OpacityProperty,
+        row.BeginAnimation(OpacityProperty,
             new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150)));
+    }
+
+    private void FileRow_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is SyncFileItem item)
+            item.PropertyChanged -= Item_PropertyChanged;
+    }
+
+    private void Item_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(SyncFileItem.IsLeaving) || sender is not SyncFileItem { IsLeaving: true } item)
+            return;
+        if (FileList.ItemContainerGenerator.ContainerFromItem(item) is not ContentPresenter cp) return;
+        cp.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, TimeSpan.FromMilliseconds(150)));
     }
 
     private void UpdateVisibility()
@@ -142,6 +192,7 @@ public partial class SyncStatusWidget : Window
         else
         {
             Hide();
+            ReleaseHeight();
         }
     }
 
