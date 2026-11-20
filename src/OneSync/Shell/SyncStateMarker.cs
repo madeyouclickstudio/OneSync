@@ -1,6 +1,8 @@
 ﻿using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 using OneSync.Util;
 
 namespace OneSync.Shell;
@@ -43,11 +45,7 @@ internal static class SyncStateMarker
         bool succeeded = false;
         try
         {
-            // FileMode.Create truncates if exists - we always write exactly 1 byte
-            using var fs = new FileStream(adsPath, FileMode.Create,
-                FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-            fs.WriteByte((byte)state);
-            succeeded = true;
+            succeeded = TryWrite(adsPath, state);
         }
         catch (IOException)
         {
@@ -55,10 +53,7 @@ internal static class SyncStateMarker
             try
             {
                 Thread.Sleep(50);
-                using var fs = new FileStream(adsPath, FileMode.Create,
-                    FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-                fs.WriteByte((byte)state);
-                succeeded = true;
+                succeeded = TryWrite(adsPath, state);
             }
             catch { /* give up silently */ }
         }
@@ -75,6 +70,28 @@ internal static class SyncStateMarker
             ShellNotifier.NotifyUpdatedByLocalPath(localPath);
         }
     }
+
+    /// <summary>
+    /// Writes the marker byte without touching the file's times. A write to any
+    /// stream counts as a write to the file, so without this every mark would
+    /// change the modified time and make a synced file look edited.
+    /// </summary>
+    private static bool TryWrite(string adsPath, SyncOverlayState state)
+    {
+        using var fs = new FileStream(adsPath, FileMode.OpenOrCreate,
+            FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+        long keep = -1;
+        if (!SetFileTime(fs.SafeFileHandle, IntPtr.Zero, IntPtr.Zero, ref keep))
+            return false;
+        fs.SetLength(0);
+        fs.WriteByte((byte)state);
+        return true;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFileTime(SafeFileHandle hFile, IntPtr lpCreationTime,
+        IntPtr lpLastAccessTime, ref long lpLastWriteTime);
 
     public static SyncOverlayState? Read(string localPath)
     {

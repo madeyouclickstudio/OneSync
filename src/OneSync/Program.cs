@@ -688,9 +688,8 @@ internal static class Program
 
             // Snapshot pending-upload paths BEFORE disposing the sync engine:
             // GetPendingUploadLocalPaths reads the LiteDB queue that DisposeAsync
-            // closes. Reading it after dispose throws ObjectDisposedException and
-            // aborts logoff cleanup - which is the only thing that writes the
-            // clean-shutdown marker.
+            // closes. If the set can't be worked out (no engine, or it threw),
+            // logoff cleanup is skipped rather than run blind.
             IReadOnlyCollection<string>? preserve = null;
             try
             {
@@ -700,8 +699,12 @@ internal static class Program
                         config.SyncSettings.ShutdownTimeoutSeconds);
                     try
                     {
-                        await syncEngine.FlushAndStopAsync(
-                            TimeSpan.FromSeconds(config.SyncSettings.ShutdownTimeoutSeconds));
+                        try
+                        {
+                            await syncEngine.FlushAndStopAsync(
+                                TimeSpan.FromSeconds(config.SyncSettings.ShutdownTimeoutSeconds));
+                        }
+                        catch (Exception ex) { logger.Warning(ex, "Sync queue flush failed"); }
 
                         preserve = syncEngine.GetPendingUploadLocalPaths();
                         if (preserve.Count > 0)
@@ -751,7 +754,10 @@ internal static class Program
             // the sync engine was disposed) are preserved so the next logon resumes them.
             try
             {
-                cleanup?.RunLogoffCleanup(preserve);
+                if (preserve != null)
+                    cleanup?.RunLogoffCleanup(preserve);
+                else if (cleanup != null && config.Cleanup.CleanOnLogoff)
+                    logger.Warning("Skipping logoff cleanup: could not work out which local files still need uploading");
             }
             catch (Exception ex) { logger.Warning(ex, "Logoff cleanup failed"); }
 

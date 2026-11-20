@@ -23,6 +23,14 @@ internal sealed class MetadataStore : IDisposable
     private readonly ILogger _logger;
     private readonly object _writeLock = new();
 
+    /// <summary>
+    /// Held while cloud state is merged into a record and the local copy brought
+    /// in line, and while a download or upload records its result, so neither
+    /// overwrites the other with a stale view of the record.
+    /// </summary>
+    public object ApplyLock { get; } = new();
+
+
     public MetadataStore(string databasePath, ILogger logger)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
@@ -138,6 +146,7 @@ internal sealed class MetadataStore : IDisposable
         FileInfo? localFile = null)
     {
         var key = RemoteItem.MakeKey(driveConfigId, relativePath);
+        lock (ApplyLock)
         lock (_writeLock)
         {
             var existing = _items.FindById(key);
@@ -212,6 +221,7 @@ internal sealed class MetadataStore : IDisposable
         long localLength, long localWriteTicks)
     {
         var key = RemoteItem.MakeKey(driveConfigId, relativePath);
+        lock (ApplyLock)
         lock (_writeLock)
         {
             var item = _items.FindById(key) ?? new RemoteItem
@@ -227,7 +237,8 @@ internal sealed class MetadataStore : IDisposable
             if (!string.IsNullOrEmpty(result.RemoteItemId)) item.RemoteItemId = result.RemoteItemId;
             if (!string.IsNullOrEmpty(result.ParentRemoteItemId)) item.ParentRemoteItemId = result.ParentRemoteItemId;
             if (!string.IsNullOrEmpty(result.WebUrl)) item.WebUrl = result.WebUrl;
-            if (!string.IsNullOrEmpty(result.QuickXorHash)) item.ContentHash = result.QuickXorHash;
+            // An old hash would make the echo of this upload look like a cloud change.
+            item.ContentHash = string.IsNullOrEmpty(result.QuickXorHash) ? null : result.QuickXorHash;
             if (result.LastModified != default) item.LastModifiedDateTime = result.LastModified;
             if (result.Created != default) item.CreatedDateTime = result.Created;
             item.Size = result.Size >= 0 ? result.Size : localLength;

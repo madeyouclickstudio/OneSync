@@ -62,27 +62,35 @@ internal sealed class PlaceholderManager
     /// </summary>
     public ApplyResult ApplyRemote(DriveConfig drive, RemoteItem incoming)
     {
-        lock (_applyLock)
+        lock (_metadata.ApplyLock)
         {
             FollowRemoteMove(drive, incoming);
 
             var existing = _metadata.Get(drive.ConfigId, incoming.RelativePath);
             var localPath = LocalPathFor(drive, incoming.RelativePath);
-            var merged = Merge(existing, incoming, localPath);
+            var merged = Merge(existing, incoming, localPath, out bool resetLocal);
+
+            // The clean local copy is out of date. Truncate it back to a placeholder
+            // before saving the new record, checking again that it still matches its
+            // old record; if it changed or is in use, keep it and the old version info.
+            if (resetLocal && !TryResetToPlaceholder(drive, localPath, existing!, incoming))
+                merged = KeepLocal(existing!, incoming);
+
             _metadata.Upsert(merged);
             CreateOrUpdate(drive, merged);
             return existing is null ? ApplyResult.Created : ApplyResult.Updated;
         }
     }
 
-    private RemoteItem Merge(RemoteItem? existing, RemoteItem incoming, string localPath)
+    private RemoteItem Merge(RemoteItem? existing, RemoteItem incoming, string localPath, out bool resetLocal)
     {
+        resetLocal = false;
         incoming.PlaceholderCreated = existing?.PlaceholderCreated ?? false;
         incoming.LastAccessedAt = existing?.LastAccessedAt ?? default;
         if (incoming.IsFolder) return incoming;
 
         var fi = new FileInfo(localPath);
-        bool hasContent = fi.Exists && !LocalState.IsPlaceholder(fi) &&
+        bool hasContent = fi.Exists && !LocalState.IsUnhydrated(fi, existing) &&
                           (fi.Length > 0 || (existing is { IsFolder: false } && LocalState.HasBaseline(existing)));
 
         if (existing is null || existing.IsFolder)
@@ -109,7 +117,7 @@ internal sealed class PlaceholderManager
             return incoming;
         }
 
-        if (hasContent && (LocalState.IsDirty(fi, existing) || existing.RemoteChangedSinceBaseline))
+        if (hasContent && (existing.RemoteChangedSinceBaseline || LocalState.IsDirtyChecked(fi, existing)))
         {
             // Both sides changed. Keep the local edits and the eTag they were based
             // on, so the upload fails its If-Match check and becomes a conflict copy
@@ -128,9 +136,55 @@ internal sealed class PlaceholderManager
 
         // Cloud has newer content and the local copy is clean: back to a placeholder,
         // downloaded again on next open.
+        resetLocal = hasContent;
         incoming.Hydrated = false;
         LocalState.ClearBaseline(incoming);
         return incoming;
+    }
+
+    /// <summary>The cloud's new details, but the version info of the local copy we kept.
+    /// The next cloud change or listing tries again.</summary>
+    private static RemoteItem KeepLocal(RemoteItem existing, RemoteItem incoming)
+    {
+        incoming.ETag = existing.ETag;
+        incoming.CTag = existing.CTag;
+        incoming.ContentHash = existing.ContentHash;
+        incoming.Hydrated = existing.Hydrated;
+        incoming.LocalLength = existing.LocalLength;
+        incoming.LocalWriteTicks = existing.LocalWriteTicks;
+        incoming.RemoteChangedSinceBaseline = existing.RemoteChangedSinceBaseline;
+        return incoming;
+    }
+
+    /// <summary>
+    /// Truncates a downloaded file back to a placeholder, but only if nobody has it
+    /// open and it still matches <paramref name="cleanAgainst"/>, the record it
+    /// was downloaded or uploaded under.
+    /// </summary>
+    private bool TryResetToPlaceholder(DriveConfig drive, string fullPath, RemoteItem cleanAgainst, RemoteItem item)
+    {
+        _suppressor.SuppressFor(fullPath, OwnWriteWindow);
+        try
+        {
+            using (var fs = new FileStream(fullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                if (LocalState.IsDirtyChecked(new FileInfo(fullPath), cleanAgainst)) return false;
+                SetSparse(fs.SafeFileHandle, true);
+                fs.SetLength(0);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Information("Kept {Path} as it is: it couldn't be swapped for the newer cloud version ({Reason})",
+                item.RelativePath, ex.Message);
+            return false;
+        }
+
+        ApplyFileTimes(fullPath, item, null);
+        SyncStateMarker.Mark(fullPath, SyncOverlayState.CloudOnly);
+        ShellNotifier.NotifyUpdated(drive, item.RelativePath);
+        _logger.Information("Cloud has a newer version of {Path}; local copy is now a placeholder", item.RelativePath);
+        return true;
     }
 
     private static bool ContentDiffers(RemoteItem existing, RemoteItem incoming)
@@ -209,28 +263,18 @@ internal sealed class PlaceholderManager
             }
 
             var existing = new FileInfo(fullPath);
-            bool fileWasNew = !existing.Exists;
-
             if (existing.Exists)
             {
+                // A placeholder, or real content. Content is only ever swapped for a
+                // placeholder by ApplyRemote, once it has checked nothing is lost.
                 if (LocalState.IsPlaceholder(existing))
-                {
                     ApplyFileTimes(fullPath, item, existing);
-                    _metadata.MarkPlaceholderCreated(drive.ConfigId, item.RelativePath);
-                    return;
-                }
-
-                // Real content on disk. Leave it alone if it's the current version
-                // or holds edits of its own.
-                if (item.Hydrated || item.RemoteChangedSinceBaseline || LocalState.IsDirty(existing, item))
-                {
-                    _metadata.MarkPlaceholderCreated(drive.ConfigId, item.RelativePath);
-                    return;
-                }
+                _metadata.MarkPlaceholderCreated(drive.ConfigId, item.RelativePath);
+                return;
             }
 
             _suppressor.SuppressFor(fullPath, OwnWriteWindow);
-            using (var fs = new FileStream(fullPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+            using (var fs = new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
             {
                 SetSparse(fs.SafeFileHandle, true);
             }
@@ -244,10 +288,7 @@ internal sealed class PlaceholderManager
             if (_thumbnails != null && ThumbnailPrefetcher.IsThumbnailableExtension(fullPath))
                 _thumbnails.EnqueueIfMissing(drive, item, fullPath);
 
-            if (fileWasNew)
-                ShellNotifier.NotifyCreated(drive, item.RelativePath);
-            else
-                ShellNotifier.NotifyUpdated(drive, item.RelativePath);
+            ShellNotifier.NotifyCreated(drive, item.RelativePath);
 
             _logger.Debug("Placeholder created: {Drive}:{Path} (remote size {Size})",
                 drive.Letter, item.RelativePath, item.Size);
@@ -295,6 +336,7 @@ internal sealed class PlaceholderManager
         var kept = new List<string>();
         var fullPath = LocalPathFor(drive, relativePath);
         bool didRemove = false;
+        lock (_metadata.ApplyLock)
         try
         {
             _suppressor.Suppress(fullPath);
@@ -334,7 +376,7 @@ internal sealed class PlaceholderManager
         var fi = new FileInfo(fullPath);
         var rel = RelativeFor(drive, fullPath);
         var meta = _metadata.Get(drive.ConfigId, rel);
-        if (LocalState.IsDirty(fi, meta) || meta?.RemoteChangedSinceBaseline == true)
+        if (meta?.RemoteChangedSinceBaseline == true || LocalState.IsDirtyChecked(fi, meta))
         {
             kept.Add(rel);
             return false;

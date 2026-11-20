@@ -326,7 +326,7 @@ internal sealed class UploadWorker
         {
             // Record from before baselines were kept: a hash tells us whether this
             // is really an edit.
-            if (string.Equals(QuickXorHash.ComputeBase64(localPath), meta.ContentHash, StringComparison.Ordinal))
+            if (LocalState.MatchesHash(localPath, meta.ContentHash))
             {
                 _metadata.MarkHydrated(op.DriveConfigId, op.RelativePath, null, fi);
                 return;
@@ -377,7 +377,7 @@ internal sealed class UploadWorker
         _metadata.RecordUpload(op.DriveConfigId, op.RelativePath, result, length, writeTicks);
         op.RemoteItemId = result.RemoteItemId;
 
-        if (!string.IsNullOrEmpty(result.QuickXorHash) && result.Size == length &&
+        if (LocalState.IsQuickXorHash(result.QuickXorHash) && result.Size == length &&
             !string.Equals(result.QuickXorHash, localHash, StringComparison.Ordinal))
         {
             _logger.Warning("Upload check: cloud hash of {Path} differs from what was sent; will re-check on next sync",
@@ -406,8 +406,25 @@ internal sealed class UploadWorker
             return;
         }
 
-        if (!remote.IsFolder && remote.Size == fi.Length && !string.IsNullOrEmpty(remote.ContentHash) &&
-            string.Equals(QuickXorHash.ComputeBase64(fi.FullName), remote.ContentHash, StringComparison.Ordinal))
+        // The cloud content is still the version our copy was based on; only its
+        // details changed. Office files on SharePoint never match by hash, as the
+        // server rewrites them, so this is the only way to tell for those.
+        if (!remote.IsFolder && meta is { IsFolder: false } && LocalState.HasBaseline(meta) &&
+            !string.IsNullOrEmpty(meta.CTag) && string.Equals(meta.CTag, remote.CTag, StringComparison.Ordinal))
+        {
+            if (LocalState.IsDirty(fi, meta))
+            {
+                await SendFileAsync(op, drive, fi.FullName, fi, remote.ETag, ct);
+                return;
+            }
+            meta.ETag = remote.ETag;
+            meta.RemoteChangedSinceBaseline = false;
+            _metadata.Upsert(meta);
+            _logger.Information("{Path} already matches the cloud copy", op.RelativePath);
+            return;
+        }
+
+        if (!remote.IsFolder && remote.Size == fi.Length && LocalState.MatchesHash(fi.FullName, remote.ContentHash))
         {
             remote.Hydrated = true;
             remote.PlaceholderCreated = true;

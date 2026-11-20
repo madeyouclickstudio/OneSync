@@ -86,7 +86,9 @@ internal sealed class StorageCleanup
         TryWriteMarker(markerFile);
     }
 
-    public void RunLogoffCleanup(IReadOnlyCollection<string>? preserveLocalPaths = null)
+    /// <summary>Wipes the drive folders except <paramref name="preserveLocalPaths"/>,
+    /// the local files the cloud doesn't have yet.</summary>
+    public void RunLogoffCleanup(IReadOnlyCollection<string> preserveLocalPaths)
     {
         if (!_config.Cleanup.CleanOnLogoff)
         {
@@ -107,10 +109,9 @@ internal sealed class StorageCleanup
         DeleteDriveStorage(_config.LocalStorageRoot, preserveSet);
     }
 
-    private HashSet<string> BuildPreserveSet(IReadOnlyCollection<string>? paths)
+    private HashSet<string> BuildPreserveSet(IReadOnlyCollection<string> paths)
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (paths == null) return set;
         foreach (var p in paths)
         {
             if (string.IsNullOrEmpty(p)) continue;
