@@ -29,4 +29,11 @@ internal interface IHydrationTrigger
     /// LastAccessedAt in MetadataStore so the LRU eviction service knows the
     /// file is in active use. Cheap - single LiteDB update.</summary>
     void NotifyAccessed(DriveConfig drive, string relativePath);
+
+    /// <summary>True while the file is a placeholder whose content is only in the cloud.</summary>
+    bool NeedsDownload(DriveConfig drive, string relativePath, string localPath);
+
+    /// <summary>Lock held while a download replaces the placeholder at
+    /// <paramref name="localPath"/>. Take it while opening the file for writing.</summary>
+    object WriteLockFor(string localPath);
 }

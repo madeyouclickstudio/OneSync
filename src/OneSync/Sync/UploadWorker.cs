@@ -287,12 +287,12 @@ internal sealed class UploadWorker
             return;
         }
 
-        var meta = _metadata.Get(op.DriveConfigId, op.RelativePath);
-        if (LocalState.IsInterruptedDownload(fi, meta))
+        if (LocalState.IsDownloadTemp(fi.FullName))
         {
             _logger.Debug("Not uploading a download in progress: {Path}", op.RelativePath);
             return;
         }
+        var meta = _metadata.Get(op.DriveConfigId, op.RelativePath);
         if (meta is { IsFolder: true })
         {
             _logger.Warning("{Path} is a folder in the cloud but a file here; uploading as a conflict copy", op.RelativePath);

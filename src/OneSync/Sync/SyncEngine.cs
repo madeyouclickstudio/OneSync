@@ -242,8 +242,8 @@ internal sealed class SyncEngine : IAsyncDisposable
         var excludePatterns = _config.SyncSettings.ExcludePatterns;
         var removed = _queue.RemoveStaleOperations(op =>
         {
-            if (op.RelativePath.EndsWith(".hydrate.tmp", StringComparison.OrdinalIgnoreCase) ||
-                (op.NewRelativePath?.EndsWith(".hydrate.tmp", StringComparison.OrdinalIgnoreCase) ?? false))
+            if (LocalState.IsDownloadTemp(op.RelativePath) ||
+                (op.NewRelativePath != null && LocalState.IsDownloadTemp(op.NewRelativePath)))
                 return true;
 
             var drive = _drives.FirstOrDefault(d => d.ConfigId == op.DriveConfigId);
@@ -307,6 +307,8 @@ internal sealed class SyncEngine : IAsyncDisposable
     {
         _cts = new CancellationTokenSource();
 
+        TidyLocalFiles();
+
         // Put back placeholders that logoff cleanup removed, before the watchers start.
         RebuildMissingPlaceholders();
 
@@ -338,6 +340,79 @@ internal sealed class SyncEngine : IAsyncDisposable
         _logger.Information(
             "SyncEngine started ({Watchers} watchers, upload worker running, delta poller polling every {Sec}s)",
             _watchers.Count, _config.SyncSettings.DeltaQueryIntervalSeconds);
+    }
+
+    /// <summary>
+    /// Before the watchers start: deletes downloads left half done by an earlier
+    /// run, and puts right files older versions left in a confusing state.
+    /// Sparse files with content are made ordinary files and kept; empty files
+    /// standing in for placeholders get the sparse flag back.
+    /// </summary>
+    private void TidyLocalFiles()
+    {
+        DateTime started;
+        try { started = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime(); }
+        catch { started = DateTime.UtcNow; }
+
+        foreach (var drive in _drives)
+        {
+            if (!Directory.Exists(drive.LocalRootPath)) continue;
+            int temps = 0, kept = 0, restored = 0;
+            IEnumerable<string> files;
+            try { files = Directory.EnumerateFiles(drive.LocalRootPath, "*", SearchOption.AllDirectories); }
+            catch (Exception ex) { _logger.Warning(ex, "Could not scan {Drive}: for leftover files", drive.Letter); continue; }
+
+            foreach (var path in files)
+            {
+                try
+                {
+                    var fi = new FileInfo(path);
+                    if (LocalState.IsDownloadTemp(path))
+                    {
+                        if (fi.LastWriteTimeUtc < started) { fi.Delete(); temps++; }
+                        continue;
+                    }
+
+                    bool sparse = (fi.Attributes & FileAttributes.SparseFile) != 0;
+                    if (!(sparse && fi.Length > 0) && !(!sparse && fi.Length == 0)) continue;
+
+                    var rel = PathUtil.NormalizeRelative(Path.GetRelativePath(drive.LocalRootPath, path));
+                    lock (_metadata.ApplyLock)
+                    {
+                        var meta = _metadata.Get(drive.ConfigId, rel);
+                        if (sparse)
+                        {
+                            // Content written into a placeholder, or a download from an
+                            // older version. Either way it may be someone's work.
+                            using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
+                                PlaceholderManager.SetSparse(fs.SafeFileHandle, false);
+                            if (meta is { IsFolder: false } && !LocalState.HasBaseline(meta))
+                            {
+                                meta.Hydrated = true;
+                                meta.RemoteChangedSinceBaseline = true;
+                                _metadata.Upsert(meta);
+                            }
+                            kept++;
+                        }
+                        else if (LocalState.IsOldStylePlaceholder(fi, meta))
+                        {
+                            using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
+                                PlaceholderManager.SetSparse(fs.SafeFileHandle, true);
+                            restored++;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug(ex, "Could not tidy {Path}", path);
+                }
+            }
+
+            if (temps + kept + restored > 0)
+                _logger.Information(
+                    "Tidied {Drive}: {Temps} leftover download(s) deleted, {Kept} file(s) with unsynced content kept, {Restored} placeholder(s) restored",
+                    drive.Letter, temps, kept, restored);
+        }
     }
 
     private void RebuildMissingPlaceholders()

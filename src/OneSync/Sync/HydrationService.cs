@@ -108,6 +108,21 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         _hydrationGate = new SemaphoreSlim(hydMax, hydMax);
     }
 
+    // Per-path locks held while a download replaces a placeholder. Dokan takes
+    // the same lock while it opens a file for writing.
+    private readonly ConcurrentDictionary<string, object> _writeLocks = new(StringComparer.OrdinalIgnoreCase);
+
+    public object WriteLockFor(string localPath) => _writeLocks.GetOrAdd(localPath, _ => new object());
+
+    /// <summary>True while the file's content is only in the cloud.</summary>
+    public bool NeedsDownload(DriveConfig drive, string relativePath, string localPath)
+    {
+        var meta = _metadata.Get(drive.ConfigId, relativePath);
+        return meta is { IsFolder: false } && meta.Size > 0 && LocalState.IsUnhydrated(new FileInfo(localPath), meta);
+    }
+
+    private enum DownloadOutcome { Done, Failed, CloudChanged, LocalChanged }
+
     /// <summary>
     /// Ensures the file at <paramref name="localPath"/> is fully hydrated.
     /// Returns true if hydrated (either was already, or just was). False if no
@@ -124,12 +139,18 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         await sem.WaitAsync(ct);
         try
         {
-            // Re-check after acquiring lock - another thread may have done it
-            meta = _metadata.Get(drive.ConfigId, relativePath);
-            if (meta == null) return false;
-            if (HasLocalContent(meta, localPath)) return true;
+            // The cloud may change while we download; if so, try once more.
+            for (int attempt = 0; ; attempt++)
+            {
+                meta = _metadata.Get(drive.ConfigId, relativePath);
+                if (meta == null || meta.IsFolder) return false;
+                if (HasLocalContent(meta, localPath)) return true;
+                if (!File.Exists(localPath)) return false;
 
-            return await DownloadAsync(drive, meta, localPath, ct);
+                var outcome = await DownloadAsync(drive, meta, localPath, ct);
+                if (outcome == DownloadOutcome.CloudChanged && attempt == 0) continue;
+                return outcome is DownloadOutcome.Done or DownloadOutcome.LocalChanged;
+            }
         }
         finally
         {
@@ -145,13 +166,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
     private static bool HasLocalContent(RemoteItem meta, string localPath)
     {
         var fi = new FileInfo(localPath);
-        if (!fi.Exists) return false;
-        if (LocalState.IsPlaceholder(fi)) return meta.Size == 0;
-        if (LocalState.IsInterruptedDownload(fi, meta)) return false;
-        if (fi.Length > 0) return true;
-        // Empty, not sparse: either a file someone emptied, or a placeholder from
-        // an older version that never got its sparse flag.
-        return meta.Size == 0 || meta.Hydrated || LocalState.HasBaseline(meta);
+        return fi.Exists && !LocalState.IsUnhydrated(fi, meta);
     }
 
     /// <summary>
@@ -171,8 +186,10 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         }
     }
 
-    private async Task<bool> DownloadAsync(DriveConfig drive, RemoteItem item, string localPath, CancellationToken ct)
+    private async Task<DownloadOutcome> DownloadAsync(DriveConfig drive, RemoteItem item, string localPath, CancellationToken ct)
     {
+        if (item.Size == 0) return CommitEmpty(drive, item, localPath);
+
         await _hydrationGate.WaitAsync(ct);
         try
         {
@@ -184,7 +201,12 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         }
     }
 
-    private async Task<bool> DownloadCoreAsync(DriveConfig drive, RemoteItem item, string localPath, CancellationToken ct)
+    /// <summary>
+    /// Downloads into a temp file next to the placeholder, then swaps it in only
+    /// if the placeholder is still there, untouched, and the cloud hasn't moved
+    /// on. Anything else on disk is left alone and the download is thrown away.
+    /// </summary>
+    private async Task<DownloadOutcome> DownloadCoreAsync(DriveConfig drive, RemoteItem item, string localPath, CancellationToken ct)
     {
         _logger.Information("Hydrating: {Drive}:{Path} ({Size} bytes)",
             drive.Letter, item.RelativePath, item.Size);
@@ -206,7 +228,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
             try { SyncStateMarker.Mark(localPath, SyncOverlayState.Error); } catch { }
 
             try { HydrationDenied?.Invoke(drive, item.RelativePath, msg); } catch { }
-            return false;
+            return DownloadOutcome.Failed;
         }
 
         if (!resp.IsSuccessStatusCode)
@@ -214,88 +236,154 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
             var body = await resp.Content.ReadAsStringAsync(ct);
             _logger.Warning("Hydration HTTP {Status} for {Drive}:{Path}: {Body}",
                 (int)resp.StatusCode, drive.Letter, item.RelativePath, Truncate(body, 300));
-            return false;
+            return DownloadOutcome.Failed;
         }
 
         // Capture the eTag we hydrated from - this is the version of the cloud
         // content sitting on disk. Future uploads will send it as If-Match.
         string? hydratedETag = resp.Headers.ETag?.Tag ?? item.ETag;
 
-        Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-
-        // The file stays sparse while it downloads, so an interrupted download is
-        // still recognised as a placeholder and never mistaken for a user edit.
-        _suppressor.Suppress(localPath);
-        bool complete = false;
+        var tempPath = LocalState.DownloadTempPathFor(localPath);
         try
         {
-            for (int attempt = 0; attempt < 10; attempt++)
+            using (var ws = new FileStream(tempPath, FileMode.CreateNew, System.IO.FileAccess.Write, FileShare.None))
             {
-                try
-                {
-                    using (var ws = new FileStream(localPath, FileMode.Create, System.IO.FileAccess.Write, FileShare.Read))
-                    {
-                        PlaceholderManager.SetSparse(ws.SafeFileHandle, true);
-                        using (var rs = await resp.Content.ReadAsStreamAsync(ct))
-                            await rs.CopyToAsync(ws, 64 * 1024, ct);
-                        ws.Flush(true);
+                using (var rs = await resp.Content.ReadAsStreamAsync(ct))
+                    await rs.CopyToAsync(ws, 64 * 1024, ct);
+                ws.Flush(true);
 
-                        if (item.Size > 0 && ws.Length != item.Size)
-                        {
-                            _logger.Warning(
-                                "Hydration size mismatch for {Drive}:{Path}: expected {Expected} bytes, got {Actual}; discarding partial download",
-                                drive.Letter, item.RelativePath, item.Size, ws.Length);
-                            ws.SetLength(0);
-                            try { SyncStateMarker.Mark(localPath, SyncOverlayState.Error); } catch { }
-                            return false;
-                        }
-                        PlaceholderManager.SetSparse(ws.SafeFileHandle, false);
-                    }
-                    break;
-                }
-                catch (IOException) when (attempt < 9)
+                if (ws.Length != item.Size)
                 {
-                    await Task.Delay(150, ct);
+                    _logger.Warning(
+                        "Hydration size mismatch for {Drive}:{Path}: expected {Expected} bytes, got {Actual}; discarding download",
+                        drive.Letter, item.RelativePath, item.Size, ws.Length);
+                    try { SyncStateMarker.Mark(localPath, SyncOverlayState.Error); } catch { }
+                    return DownloadOutcome.Failed;
                 }
             }
 
             if (item.LastModifiedDateTime != default)
-                File.SetLastWriteTimeUtc(localPath, item.LastModifiedDateTime);
+                File.SetLastWriteTimeUtc(tempPath, item.LastModifiedDateTime);
             if (item.CreatedDateTime != default)
-                File.SetCreationTimeUtc(localPath, item.CreatedDateTime);
+                File.SetCreationTimeUtc(tempPath, item.CreatedDateTime);
 
-            _metadata.MarkHydrated(drive.ConfigId, item.RelativePath, hydratedETag, new FileInfo(localPath));
-            complete = true;
-            SyncStateMarker.Mark(localPath, SyncOverlayState.Synced);
-            _logger.Information("Hydration complete: {Drive}:{Path} (eTag {ETag})",
-                drive.Letter, item.RelativePath, hydratedETag ?? "(none)");
-            return true;
+            return Commit(drive, item, localPath, hydratedETag, () => SwapIn(tempPath, localPath, item));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _logger.Warning(ex, "Hydration write failed for {Path}", localPath);
-            return false;
+            return DownloadOutcome.Failed;
         }
         finally
         {
-            if (!complete) ResetToPlaceholder(localPath);
-            _suppressor.Release(localPath);
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); }
+            catch (Exception ex) { _logger.Debug(ex, "Could not delete download temp {Path}", tempPath); }
         }
     }
 
-    private void ResetToPlaceholder(string localPath)
+    /// <summary>An empty cloud file: nothing to download, the placeholder just
+    /// becomes an ordinary empty file.</summary>
+    private DownloadOutcome CommitEmpty(DriveConfig drive, RemoteItem item, string localPath)
     {
         try
         {
-            if (!File.Exists(localPath)) return;
-            using var fs = new FileStream(localPath, FileMode.Open, System.IO.FileAccess.Write, FileShare.ReadWrite);
-            PlaceholderManager.SetSparse(fs.SafeFileHandle, true);
-            fs.SetLength(0);
+            return Commit(drive, item, localPath, item.ETag, () =>
+            {
+                using var fs = new FileStream(localPath, FileMode.Open, System.IO.FileAccess.ReadWrite, FileShare.Read);
+                if (fs.Length != 0) return false;
+                PlaceholderManager.SetSparse(fs.SafeFileHandle, false);
+                return true;
+            });
         }
         catch (Exception ex)
         {
-            _logger.Debug(ex, "Could not reset {Path} after a failed download", localPath);
+            _logger.Debug(ex, "Could not open empty file {Path}", localPath);
+            return DownloadOutcome.Failed;
         }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="replace"/> and records the download, but only if the
+    /// record is still the version that was downloaded and the local file is
+    /// still a placeholder. Done under the same locks as Dokan write opens and
+    /// cloud merges, so neither can slip in between the check and the swap.
+    /// </summary>
+    private DownloadOutcome Commit(DriveConfig drive, RemoteItem item, string localPath, string? hydratedETag,
+        Func<bool> replace)
+    {
+        lock (WriteLockFor(localPath))
+        lock (_metadata.ApplyLock)
+        {
+            var current = _metadata.Get(drive.ConfigId, item.RelativePath);
+            if (current is null || current.IsFolder) return DownloadOutcome.Failed;
+            if (!string.Equals(current.ETag, item.ETag, StringComparison.Ordinal))
+            {
+                _logger.Information("Cloud copy of {Path} changed while downloading; discarding the download",
+                    item.RelativePath);
+                return DownloadOutcome.CloudChanged;
+            }
+
+            var fi = new FileInfo(localPath);
+            if (!fi.Exists) return DownloadOutcome.Failed;
+            if (!LocalState.IsUnhydrated(fi, current))
+            {
+                _logger.Information("{Path} was written to while downloading; keeping it and discarding the download",
+                    item.RelativePath);
+                return DownloadOutcome.LocalChanged;
+            }
+
+            _suppressor.Suppress(localPath);
+            try
+            {
+                if (!replace()) return DownloadOutcome.LocalChanged;
+                _metadata.MarkHydrated(drive.ConfigId, item.RelativePath, hydratedETag, new FileInfo(localPath));
+            }
+            finally
+            {
+                _suppressor.Release(localPath);
+            }
+        }
+
+        SyncStateMarker.Mark(localPath, SyncOverlayState.Synced);
+        _logger.Information("Hydration complete: {Drive}:{Path} (eTag {ETag})",
+            drive.Letter, item.RelativePath, hydratedETag ?? "(none)");
+        return DownloadOutcome.Done;
+    }
+
+    /// <summary>
+    /// Moves the downloaded file over the placeholder. If something has the
+    /// placeholder open without delete sharing, copies into it in place instead,
+    /// through a handle that keeps other writers out.
+    /// </summary>
+    private bool SwapIn(string tempPath, string localPath, RemoteItem item)
+    {
+        try
+        {
+            File.Move(tempPath, localPath, overwrite: true);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.Debug("Could not move download over {Path} ({Reason}); copying in place", localPath, ex.Message);
+        }
+
+        using (var dst = new FileStream(localPath, FileMode.Open, System.IO.FileAccess.ReadWrite, FileShare.Read))
+        {
+            if (dst.Length != 0) return false;
+            PlaceholderManager.SetSparse(dst.SafeFileHandle, false);
+            using (var src = new FileStream(tempPath, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read))
+                src.CopyTo(dst, 64 * 1024);
+            dst.Flush(true);
+        }
+        if (item.LastModifiedDateTime != default)
+            File.SetLastWriteTimeUtc(localPath, item.LastModifiedDateTime);
+        if (item.CreatedDateTime != default)
+            File.SetCreationTimeUtc(localPath, item.CreatedDateTime);
+        return true;
     }
 
     private static string BuildItemContentUrl(DriveConfig drive, RemoteItem item)

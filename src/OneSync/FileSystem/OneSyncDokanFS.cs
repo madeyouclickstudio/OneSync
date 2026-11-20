@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Security.AccessControl;
 using System.Threading.Tasks;
 using DokanNet;
@@ -31,6 +32,14 @@ internal sealed class OneSyncDokanFS : IDokanOperations
     private readonly ILogger _logger;
     private readonly Action<string, WatcherChangeTypes>? _onLocalChange;
     private readonly IHydrationTrigger? _hydration;
+
+    // Opens that can change a file's content, as opposed to rename or delete opens.
+    private const FileAccess ContentWriteAccess = FileAccess.WriteData | FileAccess.AppendData | FileAccess.GenericWrite;
+
+    // Streams opened to change content, and streams already made non-sparse.
+    private readonly ConditionalWeakTable<FileStream, object> _writeStreams = new();
+    private readonly ConditionalWeakTable<FileStream, object> _desparsed = new();
+    private readonly object _writeLock = new();
 
     public OneSyncDokanFS(
         DriveConfig driveConfig,
@@ -78,6 +87,30 @@ internal sealed class OneSyncDokanFS : IDokanOperations
         if (string.IsNullOrEmpty(p)) return "/";
         if (!p.StartsWith('/')) p = "/" + p;
         return p;
+    }
+
+    private object WriteLockFor(string localPath) => _hydration?.WriteLockFor(localPath) ?? _writeLock;
+
+    private bool NeedsDownload(string dokanPath, string localPath)
+    {
+        if (_hydration is null) return false;
+        var rel = DokanToPosixRelative(dokanPath);
+        return rel != "/" && rel.Length > 0 && _hydration.NeedsDownload(_driveConfig, rel, localPath);
+    }
+
+    /// <summary>
+    /// Clears the sparse flag before the first write through a stream, so a file
+    /// with content of its own is never taken for a placeholder.
+    /// </summary>
+    private void EnsureNotSparse(FileStream fs, string localPath)
+    {
+        if (_desparsed.TryGetValue(fs, out _)) return;
+        lock (WriteLockFor(localPath))
+        {
+            try { PlaceholderManager.SetSparse(fs.SafeFileHandle, false); }
+            catch (Exception ex) { _logger.Debug(ex, "Could not clear sparse flag on {Path}", localPath); }
+        }
+        _desparsed.AddOrUpdate(fs, this);
     }
 
     private void EnsureHydratedSync(string dokanPath, string localPath)
@@ -151,6 +184,7 @@ internal sealed class OneSyncDokanFS : IDokanOperations
 
         var readWriteAttributes = (access & DataAccess) == 0;
         var readAccess = (access & DataWriteAccess) == 0;
+        var contentWrite = (access & ContentWriteAccess) != 0;
 
         if (info.IsDirectory)
         {
@@ -260,14 +294,35 @@ internal sealed class OneSyncDokanFS : IDokanOperations
             if (mode == FileMode.CreateNew && readAccess)
                 streamAccess = System.IO.FileAccess.ReadWrite;
 
-            var stream = new FileStream(localPath, mode, streamAccess, share, 4096, options);
-
-            // Overwriting a placeholder makes it a real file, even if it stays empty.
-            if (pathExists && (mode == FileMode.Create || mode == FileMode.Truncate))
+            FileStream stream;
+            bool overwrite = mode == FileMode.Create || mode == FileMode.Truncate;
+            if (pathExists && (contentWrite || overwrite))
             {
-                try { PlaceholderManager.SetSparse(stream.SafeFileHandle, false); }
-                catch { }
+                // Opening an existing file to change it. Done under the download's
+                // lock, so a download can't swap the file out from under this
+                // handle, and the file stops being a placeholder from here on.
+                lock (WriteLockFor(localPath))
+                {
+                    if (!overwrite && NeedsDownload(fileName, localPath))
+                    {
+                        _logger.Warning("Refused to open {Path} for writing: its content hasn't downloaded yet", localPath);
+                        return DokanResult.AccessDenied;
+                    }
+                    stream = new FileStream(localPath, mode, streamAccess, share, 4096, options);
+                    try
+                    {
+                        PlaceholderManager.SetSparse(stream.SafeFileHandle, false);
+                        _desparsed.AddOrUpdate(stream, this);
+                    }
+                    catch (Exception ex) { _logger.Debug(ex, "Could not clear sparse flag on {Path}", localPath); }
+                }
             }
+            else
+            {
+                stream = new FileStream(localPath, mode, streamAccess, share, 4096, options);
+            }
+            if (contentWrite || overwrite)
+                _writeStreams.AddOrUpdate(stream, this);
 
             if (pathExists && (mode == FileMode.OpenOrCreate || mode == FileMode.Create))
                 result = DokanResult.AlreadyExists;
@@ -312,7 +367,13 @@ internal sealed class OneSyncDokanFS : IDokanOperations
 
     public void Cleanup(string fileName, IDokanFileInfo info)
     {
+        bool wasWrite = info.Context is FileStream ws && _writeStreams.TryGetValue(ws, out _);
         CloseHandle(info);
+
+        // Tell the watcher straight away: a write that lands while the path is
+        // briefly suppressed would otherwise be missed until the next scan.
+        if (wasWrite && !info.DeleteOnClose)
+            _onLocalChange?.Invoke(GetLocalPath(fileName), WatcherChangeTypes.Changed);
 
         if (info.DeleteOnClose)
         {
@@ -371,7 +432,10 @@ internal sealed class OneSyncDokanFS : IDokanOperations
                     fs.Position = offset;
                     bytesRead = fs.Read(buffer, 0, buffer.Length);
                 }
-                if (bytesRead > 0 || offset >= fs.Length)
+                // A download replaces the placeholder with a new file, so a handle
+                // opened before it still sees the empty one.
+                bool replaced = fs.Length == 0 && new FileInfo(localPath).Length > 0;
+                if (!replaced && (bytesRead > 0 || offset >= fs.Length))
                     return DokanResult.Success;
             }
             catch
@@ -402,8 +466,10 @@ internal sealed class OneSyncDokanFS : IDokanOperations
 
     public NtStatus WriteFile(string fileName, byte[] buffer, out int bytesWritten, long offset, IDokanFileInfo info)
     {
+        var localPath = GetLocalPath(fileName);
         if (info.Context is FileStream fs)
         {
+            EnsureNotSparse(fs, localPath);
             lock (fs)
             {
                 fs.Position = offset;
@@ -413,10 +479,21 @@ internal sealed class OneSyncDokanFS : IDokanOperations
             return DokanResult.Success;
         }
 
-        var localPath = GetLocalPath(fileName);
         try
         {
-            using var stream = new FileStream(localPath, FileMode.OpenOrCreate, System.IO.FileAccess.Write, FileShare.ReadWrite);
+            FileStream opened;
+            lock (WriteLockFor(localPath))
+            {
+                if (NeedsDownload(fileName, localPath))
+                {
+                    bytesWritten = 0;
+                    return DokanResult.AccessDenied;
+                }
+                opened = new FileStream(localPath, FileMode.OpenOrCreate, System.IO.FileAccess.Write, FileShare.ReadWrite);
+                try { PlaceholderManager.SetSparse(opened.SafeFileHandle, false); }
+                catch { opened.Dispose(); throw; }
+            }
+            using var stream = opened;
             stream.Position = offset;
             stream.Write(buffer, 0, buffer.Length);
             bytesWritten = buffer.Length;
@@ -525,6 +602,8 @@ internal sealed class OneSyncDokanFS : IDokanOperations
             foreach (var item in dirInfo.EnumerateFileSystemInfos())
             {
                 if (item.Name.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (item is FileInfo && LocalState.IsDownloadTemp(item.Name))
                     continue;
 
                 if (!DokanHelper.DokanIsNameInExpression(searchPattern, item.Name, ignoreCase: true))
@@ -690,6 +769,7 @@ internal sealed class OneSyncDokanFS : IDokanOperations
         {
             try
             {
+                EnsureNotSparse(fs, GetLocalPath(fileName));
                 fs.SetLength(length);
                 return DokanResult.Success;
             }
@@ -704,6 +784,7 @@ internal sealed class OneSyncDokanFS : IDokanOperations
         {
             try
             {
+                EnsureNotSparse(fs, GetLocalPath(fileName));
                 fs.SetLength(length);
                 return DokanResult.Success;
             }

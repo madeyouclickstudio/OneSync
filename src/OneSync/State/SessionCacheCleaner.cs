@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -116,7 +116,7 @@ internal static class SessionCacheCleaner
             {
                 var fi = new FileInfo(file);
                 if (LocalState.IsPlaceholder(fi) || IsOldStylePlaceholder(drive, metadata, root, fi) ||
-                    LocalState.IsInterruptedDownload(fi, metadata.Get(drive.ConfigId, ToRelative(root, fi.FullName))))
+                    LocalState.IsDownloadTemp(fi.FullName))
                 {
                     fi.Delete();
                     filesDeleted++;

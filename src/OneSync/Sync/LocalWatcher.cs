@@ -98,6 +98,7 @@ internal sealed class LocalWatcher : IDisposable
     {
         var name = Path.GetFileName(path);
         if (string.IsNullOrEmpty(name)) return false;
+        if (LocalState.IsDownloadTemp(name)) return true;
 
         foreach (var pattern in settings.ExcludePatterns)
             if (PathUtil.MatchesGlob(name, pattern)) return true;

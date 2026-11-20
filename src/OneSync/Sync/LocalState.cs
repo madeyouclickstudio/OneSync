@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Security.Cryptography;
 using OneSync.Util;
@@ -16,20 +16,31 @@ internal static class LocalState
         fi.Exists && fi.Length == 0 && (fi.Attributes & FileAttributes.SparseFile) != 0;
 
     /// <summary>
-    /// A placeholder, or an empty file standing in for one: older versions made
-    /// placeholders without the sparse flag. Either way the content is only in
-    /// the cloud.
+    /// An empty file standing in for a placeholder: older versions made them
+    /// without the sparse flag. Startup turns these back into placeholders.
     /// </summary>
-    public static bool IsUnhydrated(FileInfo fi, RemoteItem? meta)
-    {
-        if (IsPlaceholder(fi)) return true;
-        return fi.Exists && fi.Length == 0 && meta is { IsFolder: false, Hydrated: false } &&
-               meta.Size > 0 && !HasBaseline(meta);
-    }
+    public static bool IsOldStylePlaceholder(FileInfo fi, RemoteItem? meta) =>
+        fi.Exists && fi.Length == 0 && (fi.Attributes & FileAttributes.SparseFile) == 0 &&
+        meta is { IsFolder: false, Hydrated: false } && meta.Size > 0 && !HasBaseline(meta);
 
-    public static bool IsInterruptedDownload(FileInfo fi, RemoteItem? meta) =>
-        fi.Exists && fi.Length > 0 && (fi.Attributes & FileAttributes.SparseFile) != 0 &&
-        meta is { IsFolder: false, Hydrated: false } && !HasBaseline(meta);
+    /// <summary>True when the file's content is only in the cloud.</summary>
+    public static bool IsUnhydrated(FileInfo fi, RemoteItem? meta) => IsPlaceholder(fi);
+
+    private const string DownloadTempSuffix = ".onesync.tmp";
+
+    /// <summary>A temp file a download is written to before it replaces the placeholder.
+    /// ".hydrate.tmp" is the name older versions used.</summary>
+    public static bool IsDownloadTemp(string path) =>
+        path.EndsWith(DownloadTempSuffix, StringComparison.OrdinalIgnoreCase) ||
+        path.EndsWith(".hydrate.tmp", StringComparison.OrdinalIgnoreCase);
+
+    public static string DownloadTempPathFor(string localPath)
+    {
+        var dir = Path.GetDirectoryName(localPath) ?? "";
+        var name = Path.GetFileName(localPath);
+        if (name.Length > 200) name = name[..200];
+        return Path.Combine(dir, $"~{name}.{Guid.NewGuid().ToString("N")[..8]}{DownloadTempSuffix}");
+    }
 
     /// <summary>
     /// True when the local file holds content the cloud might not have: a file we
@@ -39,7 +50,7 @@ internal static class LocalState
     {
         fi.Refresh();
         if (!fi.Exists) return false;
-        if (IsPlaceholder(fi) || IsInterruptedDownload(fi, meta)) return false;
+        if (IsPlaceholder(fi)) return false;
         if (meta is null || meta.IsFolder) return true;
 
         if (HasBaseline(meta))
