@@ -566,6 +566,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         int created = 0;
         foreach (var child in children.OrderByDescending(c => c.IsFolder))
         {
+            if (_placeholders.WaitingOnLocalChange(drive, child.RelativePath)) continue;
             try { _placeholders.CreateOrUpdate(drive, child); created++; }
             catch (Exception ex) { _logger.Debug(ex, "Materialise failed for {Path}", child.RelativePath); }
         }

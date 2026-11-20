@@ -322,6 +322,8 @@ internal sealed class SyncEngine : IAsyncDisposable
             watcher.Start();
             _watchers.Add(watcher);
         }
+        var watchers = _watchers.ToArray();
+        _placeholders.LocalChangePending = p => watchers.Any(w => w.HasPendingChange(p));
 
         _uploader = new UploadWorker(_queue, _metadata, _graph, _drives, _quotaCache, _config.SyncSettings, _logger, _conflictResolver, _placeholders);
         _uploaderTask = Task.Run(() => _uploader.RunAsync(_cts.Token));

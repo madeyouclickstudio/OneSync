@@ -26,6 +26,7 @@ internal sealed class LocalWatcher : IDisposable
     private readonly MetadataStore? _metadata;
     private FileSystemWatcher? _fsw;
     private readonly ConcurrentDictionary<string, Timer> _pending = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, int> _settling = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _settleLock = new();
     private bool _disposed;
 
@@ -165,9 +166,23 @@ internal sealed class LocalWatcher : IDisposable
 
     private void Fire(string path)
     {
-        if (_pending.TryRemove(path, out var timer)) timer.Dispose();
-        Settle(path);
+        _settling.AddOrUpdate(path, 1, (_, n) => n + 1);
+        try
+        {
+            if (_pending.TryRemove(path, out var timer)) timer.Dispose();
+            Settle(path);
+        }
+        finally
+        {
+            if (_settling.AddOrUpdate(path, 0, (_, n) => n - 1) <= 0)
+                _settling.TryRemove(new KeyValuePair<string, int>(path, 0));
+        }
     }
+
+    /// <summary>True while a change to this path is waiting out the debounce or
+    /// being settled, so cloud state shouldn't put back what was there.</summary>
+    public bool HasPendingChange(string fullPath) =>
+        _pending.ContainsKey(fullPath) || _settling.ContainsKey(fullPath);
 
     private void OnCreated(object sender, FileSystemEventArgs e)
     {

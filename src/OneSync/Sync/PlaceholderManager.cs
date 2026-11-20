@@ -50,6 +50,29 @@ internal sealed class PlaceholderManager
 
     public enum ApplyResult { None, Created, Updated }
 
+    /// <summary>Set by the sync engine: true while a watcher has an unsettled
+    /// change for a local path.</summary>
+    public Func<string, bool>? LocalChangePending { get; set; }
+
+    /// <summary>True if nothing is at this path locally and a change to it (or a
+    /// folder above it) hasn't been picked up by the watcher yet.</summary>
+    public bool WaitingOnLocalChange(DriveConfig drive, string relativePath)
+    {
+        var pending = LocalChangePending;
+        if (pending is null) return false;
+
+        var local = LocalPathFor(drive, relativePath);
+        if (File.Exists(local) || Directory.Exists(local)) return false;
+
+        var p = relativePath;
+        while (true)
+        {
+            if (pending(LocalPathFor(drive, p))) return true;
+            if (p == "/" || string.IsNullOrEmpty(p)) return false;
+            p = PathUtil.ParentOf(p);
+        }
+    }
+
     /// <summary>True for folders whose contents we keep up to date: the drive root
     /// once it has been listed, and any folder we hold a record for.</summary>
     public bool IsTrackedFolder(DriveConfig drive, string relativePath)
@@ -82,6 +105,15 @@ internal sealed class PlaceholderManager
                         incoming.RelativePath);
                     return ApplyResult.None;
                 }
+            }
+
+            // Deleted or moved aside locally a moment ago and the watcher hasn't
+            // caught up yet. Don't put it back; the watcher queues what's needed.
+            if (WaitingOnLocalChange(drive, incoming.RelativePath))
+            {
+                _logger.Debug("Not applying cloud state for {Path}: a local change is still settling",
+                    incoming.RelativePath);
+                return ApplyResult.None;
             }
 
             FollowRemoteMove(drive, incoming);
