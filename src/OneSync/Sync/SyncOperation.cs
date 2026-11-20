@@ -49,6 +49,10 @@ internal sealed class SyncOperation
     public int RetryCount { get; set; }
     public string? ErrorMessage { get; set; }
 
+    /// <summary>Failed for a reason retrying won't fix (access denied, too large).
+    /// Other failures are retried later.</summary>
+    public bool PermanentFailure { get; set; }
+
     public long FileSizeBytes { get; set; }
     public string? ContentHash { get; set; }
 

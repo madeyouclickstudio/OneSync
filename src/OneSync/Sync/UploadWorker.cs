@@ -80,16 +80,26 @@ internal sealed class UploadWorker
         foreach (var d in drives) _drivesById[d.ConfigId] = d;
     }
 
+    private readonly CancellationTokenSource _draining = new();
+
+    /// <summary>
+    /// Stops <see cref="RunAsync"/> starting new ops. Ops already running finish
+    /// and RunAsync then returns, so a flush can take over without running an op twice.
+    /// </summary>
+    public void StopTakingNewWork() => _draining.Cancel();
+
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         _logger.Information("UploadWorker started");
         var degree = Math.Max(1, _settings.MaxConcurrentUploads);
+        using var loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _draining.Token);
+        var loop = loopCts.Token;
 
-        while (!cancellationToken.IsCancellationRequested)
+        while (!loop.IsCancellationRequested)
         {
             if (_pause?.IsPaused() == true)
             {
-                try { await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken); }
+                try { await Task.Delay(TimeSpan.FromSeconds(2), loop); }
                 catch (OperationCanceledException) { break; }
                 continue;
             }
@@ -97,12 +107,12 @@ internal sealed class UploadWorker
             var batch = _queue.GetPending(max: degree * 4);
             if (batch.Count == 0)
             {
-                try { await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken); }
+                try { await Task.Delay(TimeSpan.FromSeconds(2), loop); }
                 catch (OperationCanceledException) { break; }
                 continue;
             }
 
-            try { await RunBatchAsync(batch, degree, cancellationToken); }
+            try { await RunBatchAsync(batch, degree, cancellationToken, loop); }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { _logger.Warning(ex, "Batch processing had exceptions"); }
         }
@@ -131,14 +141,20 @@ internal sealed class UploadWorker
         }
     }
 
-    private async Task RunBatchAsync(List<SyncOperation> batch, int degree, CancellationToken ct)
+    private async Task RunBatchAsync(List<SyncOperation> batch, int degree, CancellationToken ct,
+        CancellationToken stopStarting = default)
     {
         using var sem = new SemaphoreSlim(degree, degree);
         var tasks = new List<Task>(batch.Count);
         foreach (var op in batch)
         {
-            if (ct.IsCancellationRequested) break;
+            if (ct.IsCancellationRequested || stopStarting.IsCancellationRequested) break;
             await sem.WaitAsync(ct);
+            if (stopStarting.IsCancellationRequested)
+            {
+                sem.Release();
+                break;
+            }
             tasks.Add(Task.Run(async () =>
             {
                 try { await ProcessAsync(op, ct); }
@@ -223,7 +239,7 @@ internal sealed class UploadWorker
             if (op.RetryCount >= _settings.MaxRetries)
             {
                 _logger.Error(ex, "Op failed after {Retries} retries: {Op}", op.RetryCount, op);
-                _queue.MarkFailed(op, ex.Message);
+                _queue.MarkFailed(op, ex.Message, permanent: false);
                 MarkOpFile(op, drive, SyncOverlayState.Error);
                 try { UploadFailed?.Invoke(drive, op.RelativePath, ex.Message); } catch { }
             }

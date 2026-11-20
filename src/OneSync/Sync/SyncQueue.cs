@@ -66,6 +66,8 @@ internal sealed class SyncQueue : IDisposable
                     {
                         existing.FileSizeBytes = op.FileSizeBytes;
                         existing.ContentHash = op.ContentHash;
+                        // Behind anything queued since, such as a rename of this path.
+                        existing.QueuedAt = DateTime.UtcNow;
                         existing.Status = SyncOpStatus.Pending;
                         existing.NextAttemptAt = null;
                         existing.ErrorMessage = null;
@@ -118,19 +120,26 @@ internal sealed class SyncQueue : IDisposable
 
         var busyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var busyTrees = new List<(string Drive, string Path)>();
+        var earlier = new List<(string Drive, string Path)>();
         var ready = new List<SyncOperation>();
 
         foreach (var op in outstanding.OrderBy(o => o.QueuedAt).ThenBy(o => o.Id))
         {
             bool blocked =
                 IsBusy(op.DriveConfigId, op.RelativePath, busyPaths, busyTrees) ||
-                (op.NewRelativePath != null && IsBusy(op.DriveConfigId, op.NewRelativePath, busyPaths, busyTrees));
+                (op.NewRelativePath != null && IsBusy(op.DriveConfigId, op.NewRelativePath, busyPaths, busyTrees)) ||
+                ((op.Type == SyncOpType.RemoteDelete || op.Type == SyncOpType.RemoteRename) &&
+                 earlier.Exists(e => e.Drive == op.DriveConfigId &&
+                     (Util.PathUtil.IsSameOrUnder(e.Path, op.RelativePath) ||
+                      (op.NewRelativePath != null && Util.PathUtil.IsSameOrUnder(e.Path, op.NewRelativePath)))));
 
             bool due = op.Status != SyncOpStatus.InProgress &&
                        (ignoreBackoff || op.NextAttemptAt == null || op.NextAttemptAt <= now);
 
             if (!blocked && due && ready.Count < max) ready.Add(op);
 
+            earlier.Add((op.DriveConfigId, op.RelativePath));
+            if (op.NewRelativePath != null) earlier.Add((op.DriveConfigId, op.NewRelativePath));
             busyPaths.Add(op.DriveConfigId + "|" + op.RelativePath);
             if (op.NewRelativePath != null) busyPaths.Add(op.DriveConfigId + "|" + op.NewRelativePath);
             if (op.Type != SyncOpType.Upload)
@@ -243,6 +252,7 @@ internal sealed class SyncQueue : IDisposable
                 o.Status == SyncOpStatus.Failed);
             if (failed == null) return false;
             failed.Status = SyncOpStatus.Pending;
+            failed.PermanentFailure = false;
             failed.RetryCount = 0;
             failed.ErrorMessage = null;
             failed.NextAttemptAt = null;
@@ -262,6 +272,7 @@ internal sealed class SyncQueue : IDisposable
             foreach (var op in failed)
             {
                 op.Status = SyncOpStatus.Pending;
+                op.PermanentFailure = false;
                 op.RetryCount = 0;
                 op.ErrorMessage = null;
                 op.NextAttemptAt = null;
@@ -296,9 +307,12 @@ internal sealed class SyncQueue : IDisposable
         Update(op);
     }
 
-    public void MarkFailed(SyncOperation op, string error)
+    /// <param name="permanent">False when the op ran out of retries on an error
+    /// that may clear up, such as being offline; it is tried again later.</param>
+    public void MarkFailed(SyncOperation op, string error, bool permanent = true)
     {
         op.Status = SyncOpStatus.Failed;
+        op.PermanentFailure = permanent;
         op.ErrorMessage = error;
         op.CompletedAt = DateTime.UtcNow;
         Update(op);
@@ -335,20 +349,51 @@ internal sealed class SyncQueue : IDisposable
 
             // Failed delete/rename ops should be retried - leaving them failed
             // means the delta poller will recreate the placeholder next poll.
+            // So should anything that only ran out of retries.
             var failedSyncOps = _ops.Query()
-                .Where(o => o.Status == SyncOpStatus.Failed &&
-                       (o.Type == SyncOpType.RemoteDelete || o.Type == SyncOpType.RemoteRename))
-                .ToList();
+                .Where(o => o.Status == SyncOpStatus.Failed)
+                .ToList()
+                .FindAll(o => o.Type == SyncOpType.RemoteDelete || o.Type == SyncOpType.RemoteRename ||
+                              !o.PermanentFailure);
             foreach (var op in failedSyncOps)
             {
                 op.Status = SyncOpStatus.Pending;
+                op.PermanentFailure = false;
                 op.RetryCount = 0;
                 op.StartedAt = null;
                 op.ErrorMessage = null;
                 _ops.Update(op);
             }
             if (failedSyncOps.Count > 0)
-                _logger.Information("Reset {Count} failed delete/rename ops back to Pending on startup", failedSyncOps.Count);
+                _logger.Information("Reset {Count} failed ops back to Pending on startup", failedSyncOps.Count);
+        }
+    }
+
+    /// <summary>
+    /// Puts ops that ran out of retries some time ago back in the queue, so an
+    /// upload that failed while offline is sent once the connection is back.
+    /// </summary>
+    public int RearmTransientFailures(TimeSpan olderThan)
+    {
+        var cutoff = DateTime.UtcNow - olderThan;
+        lock (_writeLock)
+        {
+            var due = _ops.Query()
+                .Where(o => o.Status == SyncOpStatus.Failed)
+                .ToList()
+                .FindAll(o => !o.PermanentFailure && o.CompletedAt < cutoff);
+            foreach (var op in due)
+            {
+                op.Status = SyncOpStatus.Pending;
+                op.RetryCount = 0;
+                op.ErrorMessage = null;
+                op.NextAttemptAt = null;
+                op.QueuedAt = DateTime.UtcNow;
+                _ops.Update(op);
+            }
+            if (due.Count > 0)
+                _logger.Information("Retrying {Count} op(s) that failed earlier", due.Count);
+            return due.Count;
         }
     }
 

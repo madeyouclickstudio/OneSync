@@ -167,6 +167,9 @@ internal sealed class SyncEngine : IAsyncDisposable
         int queued = 0;
         try
         {
+            // Uploads that ran out of retries (offline, say) get another go here.
+            _queue.RearmTransientFailures(TimeSpan.FromMinutes(30));
+
             var outstanding = new HashSet<string>(
                 _queue.GetOutstanding().Select(o => o.DriveConfigId + "|" + o.RelativePath),
                 StringComparer.OrdinalIgnoreCase);
@@ -494,6 +497,10 @@ internal sealed class SyncEngine : IAsyncDisposable
         using var flushCts = new CancellationTokenSource(timeout);
         try
         {
+            // Let the background loop finish the ops it has started, then send
+            // the rest here, so no op is run by both at once.
+            _uploader.StopTakingNewWork();
+            if (_uploaderTask != null) await _uploaderTask.WaitAsync(flushCts.Token);
             await _uploader.FlushAsync(flushCts.Token);
         }
         catch (OperationCanceledException)

@@ -125,13 +125,31 @@ internal sealed class LocalWatcher : IDisposable
 
     private void Schedule(string path)
     {
-        _pending.AddOrUpdate(path,
-            p => new Timer(_ => Fire(p), null, _settings.UploadDebounceMs, Timeout.Infinite),
-            (_, existing) =>
+        while (true)
+        {
+            if (_pending.TryGetValue(path, out var existing))
             {
-                existing.Change(_settings.UploadDebounceMs, Timeout.Infinite);
-                return existing;
-            });
+                // Fire may have just removed and disposed this timer; then start a new one.
+                try
+                {
+                    existing.Change(_settings.UploadDebounceMs, Timeout.Infinite);
+                    return;
+                }
+                catch (ObjectDisposedException)
+                {
+                    ((ICollection<KeyValuePair<string, Timer>>)_pending).Remove(new(path, existing));
+                    continue;
+                }
+            }
+
+            var timer = new Timer(_ => Fire(path), null, Timeout.Infinite, Timeout.Infinite);
+            if (_pending.TryAdd(path, timer))
+            {
+                timer.Change(_settings.UploadDebounceMs, Timeout.Infinite);
+                return;
+            }
+            timer.Dispose();
+        }
     }
 
     /// <summary>A change reported by the drive itself rather than the folder watcher.</summary>

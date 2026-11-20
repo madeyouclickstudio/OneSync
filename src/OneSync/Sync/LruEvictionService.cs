@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -192,8 +192,9 @@ internal sealed class LruEvictionService : IAsyncDisposable
         if (!fi.Exists || fi.Length == 0)
         {
             // Already dehydrated or never hydrated. Update metadata to match
-            // disk reality so we don't keep retrying.
-            if (item.Hydrated)
+            // disk reality so we don't keep retrying. An ordinary empty file is
+            // left alone: the user may have emptied it and the upload is to come.
+            if (item.Hydrated && (!fi.Exists || LocalState.IsPlaceholder(fi)))
                 _metadata.MarkDehydrated(drive.ConfigId, item.RelativePath);
             return false;
         }
@@ -217,8 +218,20 @@ internal sealed class LruEvictionService : IAsyncDisposable
             // Safety check 4: exclusive lock. We open with FileShare.None so
             // if Word / antivirus / preview pane has the file open, this
             // throws and we skip cleanly - no risk of mid-edit truncation.
+            lock (_metadata.ApplyLock)
             using (var fs = new FileStream(localPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
+                // Check again now nothing else can write to it: a save may have
+                // landed since the checks above.
+                var now = _metadata.Get(drive.ConfigId, item.RelativePath);
+                var check = new FileInfo(localPath);
+                if (now is null || now.RemoteChangedSinceBaseline || LocalState.IsDirty(check, now) ||
+                    check.Length != now.Size)
+                {
+                    _logger.Debug("Skip {Path}: changed while being evicted", item.RelativePath);
+                    try { _suppressor.Release(localPath); } catch { }
+                    return false;
+                }
                 // Truncate to 0.
                 fs.SetLength(0);
                 // Mark as sparse so the directory entry stays cheap.
