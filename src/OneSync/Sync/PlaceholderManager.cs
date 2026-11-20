@@ -30,13 +30,17 @@ internal sealed class PlaceholderManager
         MetadataStore metadata,
         LocalChangeSuppressor suppressor,
         ILogger logger,
-        ThumbnailPrefetcher? thumbnails = null)
+        ThumbnailPrefetcher? thumbnails = null,
+        SyncQueue? queue = null)
     {
         _metadata = metadata;
         _suppressor = suppressor;
         _logger = logger;
         _thumbnails = thumbnails;
+        _queue = queue;
     }
+
+    private readonly SyncQueue? _queue;
 
     public static string LocalPathFor(DriveConfig drive, string relativePath)
     {
@@ -64,6 +68,22 @@ internal sealed class PlaceholderManager
     {
         lock (_metadata.ApplyLock)
         {
+            // A local rename or delete here hasn't reached the cloud yet, so this
+            // cloud state is out of date. Applying it would move or bring back
+            // files the user has moved or deleted.
+            if (_queue != null)
+            {
+                var known = string.IsNullOrEmpty(incoming.RemoteItemId) ? null : _metadata.GetById(incoming.RemoteItemId);
+                if (_queue.HasPendingMoveCovering(drive.ConfigId, incoming.RelativePath) ||
+                    (known != null && known.DriveConfigId == drive.ConfigId &&
+                     _queue.HasPendingMoveCovering(drive.ConfigId, known.RelativePath)))
+                {
+                    _logger.Debug("Not applying cloud state for {Path}: a local rename or delete is waiting",
+                        incoming.RelativePath);
+                    return ApplyResult.None;
+                }
+            }
+
             FollowRemoteMove(drive, incoming);
 
             var existing = _metadata.Get(drive.ConfigId, incoming.RelativePath);

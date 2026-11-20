@@ -273,7 +273,7 @@ internal sealed class SyncEngine : IAsyncDisposable
                 config.SyncSettings.MaxConcurrentThumbnailFetches, logger)
             : null;
         _suppressor = new LocalChangeSuppressor();
-        _placeholders = new PlaceholderManager(_metadata, _suppressor, logger, _thumbnails);
+        _placeholders = new PlaceholderManager(_metadata, _suppressor, logger, _thumbnails, _queue);
         _hydration = new HydrationService(_graph, _metadata, _placeholders, _drives, _suppressor, config.SyncSettings, logger);
         _conflictResolver = new ConflictResolver(_metadata, _placeholders, _queue, _suppressor, logger);
         _manifest = new PendingManifestService(_graph, logger);
@@ -323,7 +323,7 @@ internal sealed class SyncEngine : IAsyncDisposable
             _watchers.Add(watcher);
         }
 
-        _uploader = new UploadWorker(_queue, _metadata, _graph, _drives, _quotaCache, _config.SyncSettings, _logger, _conflictResolver);
+        _uploader = new UploadWorker(_queue, _metadata, _graph, _drives, _quotaCache, _config.SyncSettings, _logger, _conflictResolver, _placeholders);
         _uploaderTask = Task.Run(() => _uploader.RunAsync(_cts.Token));
 
         _delta.Start();

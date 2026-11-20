@@ -67,8 +67,10 @@ internal sealed class UploadWorker
         QuotaCache quotaCache,
         SyncSettings settings,
         ILogger logger,
-        ConflictResolver? conflictResolver = null)
+        ConflictResolver? conflictResolver = null,
+        PlaceholderManager? placeholders = null)
     {
+        _placeholders = placeholders;
         _queue = queue;
         _metadata = metadata;
         _graph = graph;
@@ -686,19 +688,49 @@ internal sealed class UploadWorker
         _logger.Information("Created folder in cloud: {Drive}:{Path}", drive.Letter, relativePath);
     }
 
+    private readonly PlaceholderManager? _placeholders;
+
     private async Task RemoteDeleteAsync(SyncOperation op, DriveConfig drive, CancellationToken ct)
     {
         // By id where we have it, so a different file that has since appeared at
-        // the same path is never the one deleted.
-        var url = !string.IsNullOrEmpty(op.RemoteItemId)
-            ? BuildItemByIdUrl(drive, op.RemoteItemId)
+        // the same path is never the one deleted. A delete queued behind a first
+        // upload gets its id from the record that upload made.
+        var recorded = _metadata.Get(drive.ConfigId, op.RelativePath);
+        var id = !string.IsNullOrEmpty(op.RemoteItemId) ? op.RemoteItemId : recorded?.RemoteItemId;
+        var url = !string.IsNullOrEmpty(id)
+            ? BuildItemByIdUrl(drive, id)
             : BuildItemUrl(drive, op.RelativePath);
+        if (string.IsNullOrEmpty(id) && op.FollowsUpload)
+        {
+            _logger.Information("Nothing to delete for {Path}: its upload didn't reach the cloud", op.RelativePath);
+            return;
+        }
+        bool ifMatch = !string.IsNullOrEmpty(id) && !string.IsNullOrEmpty(op.ETag);
 
-        using var resp = await _graph.SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, url), ct);
+        using var resp = await _graph.SendAsync(() =>
+        {
+            var r = new HttpRequestMessage(HttpMethod.Delete, url);
+            if (ifMatch) r.Headers.TryAddWithoutValidation("If-Match", op.ETag);
+            return r;
+        }, ct);
 
         if (resp.IsSuccessStatusCode || resp.StatusCode == HttpStatusCode.NotFound)
         {
+            if (recorded != null && !string.IsNullOrEmpty(id) &&
+                string.Equals(recorded.RemoteItemId, id, StringComparison.Ordinal) &&
+                !File.Exists(PlaceholderManager.LocalPathFor(drive, op.RelativePath)) &&
+                !Directory.Exists(PlaceholderManager.LocalPathFor(drive, op.RelativePath)))
+                _metadata.DeleteTree(drive.ConfigId, op.RelativePath);
             _logger.Information("Remote delete OK: {Drive}:{Path}", drive.Letter, op.RelativePath);
+            return;
+        }
+        if (resp.StatusCode == HttpStatusCode.PreconditionFailed && !string.IsNullOrEmpty(id))
+        {
+            // Someone changed it in the cloud since this copy was synced. Keep
+            // their version and bring it back here as a placeholder.
+            _logger.Information("Not deleting {Path}: it changed in the cloud; restoring it", op.RelativePath);
+            _queue.MarkCompleted(op);
+            await RestoreFromCloudAsync(drive, id, ct);
             return;
         }
         if (resp.StatusCode == HttpStatusCode.Forbidden)
@@ -727,6 +759,12 @@ internal sealed class UploadWorker
                        ?? _metadata.Get(drive.ConfigId, op.RelativePath)?.RemoteItemId;
 
         var newLocal = PlaceholderManager.LocalPathFor(drive, op.NewRelativePath);
+
+        // A rename queued behind a first upload: the record is still at the old name.
+        bool moveRecord = _metadata.Get(drive.ConfigId, op.NewRelativePath) is null &&
+                          _metadata.Get(drive.ConfigId, op.RelativePath) is { } oldRecord &&
+                          string.Equals(oldRecord.RemoteItemId, remoteId, StringComparison.Ordinal);
+
         if (string.IsNullOrEmpty(remoteId))
         {
             // Never reached the cloud under its old name: send it under the new one.
@@ -784,6 +822,8 @@ internal sealed class UploadWorker
                 inner: null, statusCode: resp.StatusCode);
         }
 
+        if (moveRecord) _metadata.MovePath(drive.ConfigId, op.RelativePath, op.NewRelativePath);
+
         var json = await resp.Content.ReadAsStringAsync(ct);
         using (var doc = JsonDocument.Parse(json))
             _metadata.UpdateRemoteFields(drive.ConfigId, op.NewRelativePath, UploadResult.FromJson(doc.RootElement));
@@ -829,6 +869,25 @@ internal sealed class UploadWorker
     }
 
     /// <summary>The cloud's current view of an item, or null if there's nothing at that path.</summary>
+    private async Task RestoreFromCloudAsync(DriveConfig drive, string remoteId, CancellationToken ct)
+    {
+        if (_placeholders is null) return;
+        try
+        {
+            var url = BuildItemByIdUrl(drive, remoteId);
+            using var resp = await _graph.SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), ct);
+            if (!resp.IsSuccessStatusCode) return;
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            var item = GraphItem.Parse(drive, doc.RootElement);
+            if (item != null) _placeholders.ApplyRemote(drive, item);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.Warning(ex, "Could not restore {Id} from the cloud; the next sync will", remoteId);
+        }
+    }
+
     private async Task<RemoteItem?> GetRemoteItemAsync(DriveConfig drive, string relativePath, CancellationToken ct)
     {
         var url = BuildItemUrl(drive, relativePath);

@@ -73,8 +73,11 @@ internal sealed class LocalWatcher : IDisposable
 
     /// <summary>Stops watching. Changes still waiting out their debounce are
     /// queued now rather than dropped.</summary>
+    private volatile bool _stopping;
+
     public void Stop()
     {
+        _stopping = true;
         if (_fsw is null) return;
         _fsw.EnableRaisingEvents = false;
         _fsw.Dispose();
@@ -155,7 +158,8 @@ internal sealed class LocalWatcher : IDisposable
     /// <summary>A change reported by the drive itself rather than the folder watcher.</summary>
     public void NotifyChanged(string fullPath)
     {
-        if (IsOwnWrite(fullPath) || IsIgnoredName(fullPath, _settings)) return;
+        // Not dropped while suppressed: Settle checks again once that ends.
+        if (IsIgnoredName(fullPath, _settings)) return;
         Schedule(fullPath);
     }
 
@@ -224,11 +228,57 @@ internal sealed class LocalWatcher : IDisposable
         var newRel = ToRelativePath(newFull);
         var meta = _metadata?.Get(_drive.ConfigId, oldRel);
 
+        var dest = _metadata?.Get(_drive.ConfigId, newRel);
+        bool replacesTracked = dest is { IsFolder: false } && File.Exists(newFull) &&
+                               !string.Equals(dest.RemoteItemId, meta?.RemoteItemId, StringComparison.Ordinal);
+
         if (meta is null || string.IsNullOrEmpty(meta.RemoteItemId))
         {
             // Never reached the cloud under the old name: just send what's there now.
             _queue.CancelWaitingUploads(_drive.ConfigId, oldRel);
+            if (_queue.HasUploadInProgress(_drive.ConfigId, oldRel))
+            {
+                // Its first upload is still going and will create the old name in
+                // the cloud. Follow it with a rename, or a delete if this name is
+                // taken, so no stray copy is left behind.
+                _queue.Enqueue(new SyncOperation
+                {
+                    Type = replacesTracked ? SyncOpType.RemoteDelete : SyncOpType.RemoteRename,
+                    DriveConfigId = _drive.ConfigId,
+                    DriveLetter = _drive.Letter,
+                    RelativePath = oldRel,
+                    NewRelativePath = replacesTracked ? null : newRel,
+                    FollowsUpload = true,
+                    Priority = _drive.Priority,
+                });
+                _logger.Information("Queued {Op} of {Path} after its upload in progress",
+                    replacesTracked ? "delete" : "rename", oldRel);
+            }
             Schedule(newFull);
+            return;
+        }
+
+        if (replacesTracked && !meta.IsFolder)
+        {
+            // Saved through another name and renamed over the real file. The real
+            // file keeps its record and gets the new content; the item uploaded
+            // under the other name is deleted.
+            _queue.CancelWaitingUploads(_drive.ConfigId, oldRel);
+            _queue.Enqueue(new SyncOperation
+            {
+                Type = SyncOpType.RemoteDelete,
+                DriveConfigId = _drive.ConfigId,
+                DriveLetter = _drive.Letter,
+                RelativePath = oldRel,
+                RemoteItemId = meta.RemoteItemId,
+                ETag = meta.ETag,
+                Priority = _drive.Priority,
+            });
+            _metadata!.DeleteTree(_drive.ConfigId, oldRel);
+            if (_pending.TryRemove(oldFull, out var ot)) ot.Dispose();
+            Schedule(newFull);
+            _logger.Information("{Old} replaced {New}: uploading {New} and deleting {Old} in the cloud",
+                oldRel, newRel, newRel, oldRel);
             return;
         }
 
@@ -253,6 +303,23 @@ internal sealed class LocalWatcher : IDisposable
         {
             t.Dispose();
             Schedule(newFull);
+        }
+
+        // Uploads queued under the old folder name are dropped as their files
+        // are gone; look for edits to send under the new one.
+        if (meta.IsFolder && Directory.Exists(newFull))
+        {
+            try
+            {
+                foreach (var f in Directory.EnumerateFiles(newFull, "*", SearchOption.AllDirectories))
+                {
+                    if (IsIgnored(f)) continue;
+                    var m = _metadata.Get(_drive.ConfigId, ToRelativePath(f));
+                    if (m is null || (LocalState.HasBaseline(m) && LocalState.IsDirty(new FileInfo(f), m)))
+                        Schedule(f);
+                }
+            }
+            catch (Exception ex) { _logger.Debug(ex, "Could not check {Path} for edits after rename", newRel); }
         }
     }
 
@@ -284,7 +351,13 @@ internal sealed class LocalWatcher : IDisposable
         {
             lock (_settleLock)
             {
-                if (IsOwnWrite(fullPath)) return;
+                if (IsOwnWrite(fullPath))
+                {
+                    // Look again once we've finished with the path, rather than
+                    // lose a change the user made meanwhile.
+                    if (!_stopping) Schedule(fullPath);
+                    return;
+                }
                 var rel = ToRelativePath(fullPath);
 
                 if (Directory.Exists(fullPath))
@@ -391,6 +464,20 @@ internal sealed class LocalWatcher : IDisposable
         {
             if (waiting)
                 _logger.Information("Dropped queued upload of {Path}: deleted before it was sent", rel);
+            if (_queue.HasUploadInProgress(_drive.ConfigId, rel))
+            {
+                // Its first upload is still going; delete what it creates.
+                _queue.Enqueue(new SyncOperation
+                {
+                    Type = SyncOpType.RemoteDelete,
+                    DriveConfigId = _drive.ConfigId,
+                    DriveLetter = _drive.Letter,
+                    RelativePath = rel,
+                    FollowsUpload = true,
+                    Priority = _drive.Priority,
+                });
+                _logger.Information("Queued delete of {Path} after its upload in progress", rel);
+            }
             return;
         }
 
@@ -401,6 +488,7 @@ internal sealed class LocalWatcher : IDisposable
             DriveLetter = _drive.Letter,
             RelativePath = rel,
             RemoteItemId = string.IsNullOrEmpty(meta.RemoteItemId) ? null : meta.RemoteItemId,
+            ETag = meta.IsFolder ? null : meta.ETag,
             Priority = _drive.Priority,
         });
         _metadata!.AddDeleted(new DeletedItem

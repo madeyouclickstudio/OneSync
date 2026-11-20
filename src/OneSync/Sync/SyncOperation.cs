@@ -53,6 +53,14 @@ internal sealed class SyncOperation
     /// Other failures are retried later.</summary>
     public bool PermanentFailure { get; set; }
 
+    /// <summary>For a file delete: the eTag of the version deleted locally, so a
+    /// newer cloud version isn't deleted with it.</summary>
+    public string? ETag { get; set; }
+
+    /// <summary>Queued to undo what a first upload still in progress creates. If
+    /// that upload left no record, there is nothing of ours to delete.</summary>
+    public bool FollowsUpload { get; set; }
+
     public long FileSizeBytes { get; set; }
     public string? ContentHash { get; set; }
 

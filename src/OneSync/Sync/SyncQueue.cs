@@ -41,6 +41,7 @@ internal sealed class SyncQueue : IDisposable
         _ops.EnsureIndex(o => o.QueuedAt);
         _ops.EnsureIndex(o => o.DriveConfigId);
         _ops.EnsureIndex(o => o.RelativePath);
+        _ops.EnsureIndex(o => o.Type);
 
         _deltaTokens = _db.GetCollection<DeltaToken>(DeltaCollectionName);
         _deltaTokens.EnsureIndex(t => t.DriveConfigId, unique: true);
@@ -163,6 +164,17 @@ internal sealed class SyncQueue : IDisposable
 
     /// <summary>Drops uploads and folder creates still waiting for this path or
     /// anything under it. Returns how many were dropped.</summary>
+    /// <summary>True while an upload of exactly this path is being sent.</summary>
+    public bool HasUploadInProgress(string driveConfigId, string relativePath)
+    {
+        lock (_writeLock)
+        {
+            return _ops.Exists(o =>
+                o.DriveConfigId == driveConfigId && o.Type == SyncOpType.Upload &&
+                o.Status == SyncOpStatus.InProgress && o.RelativePath == relativePath);
+        }
+    }
+
     public int CancelWaitingUploads(string driveConfigId, string relativePath)
     {
         lock (_writeLock)
@@ -210,6 +222,27 @@ internal sealed class SyncQueue : IDisposable
     /// <summary>True if this exact (driveConfigId, relativePath) has any pending,
     /// in-progress, or retry op queued. Used by LruEvictionService to skip
     /// files that are mid-sync - evicting one would race with the upload.</summary>
+    /// <summary>
+    /// True when a local rename or delete of this path, or of a folder above it,
+    /// hasn't reached the cloud yet.
+    /// </summary>
+    public bool HasPendingMoveCovering(string driveConfigId, string relativePath)
+    {
+        List<SyncOperation> moves;
+        lock (_writeLock)
+        {
+            moves = _ops.Find(o =>
+                    (o.Type == SyncOpType.RemoteRename || o.Type == SyncOpType.RemoteDelete) &&
+                    o.DriveConfigId == driveConfigId &&
+                    (o.Status == SyncOpStatus.Pending || o.Status == SyncOpStatus.InProgress ||
+                     o.Status == SyncOpStatus.Retry))
+                .ToList();
+        }
+        return moves.Exists(o =>
+            Util.PathUtil.IsSameOrUnder(relativePath, o.RelativePath) ||
+            (o.NewRelativePath != null && Util.PathUtil.IsSameOrUnder(relativePath, o.NewRelativePath)));
+    }
+
     public bool HasPendingForPath(string driveConfigId, string relativePath)
     {
         lock (_writeLock)
