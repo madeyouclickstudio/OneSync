@@ -11,7 +11,7 @@
 
   <Package Name="OneSync"
            Manufacturer="madeyouclick studio"
-           Version="1.4.2.0"
+           Version="1.4.3.0"
            UpgradeCode="E4D2945E-D0FF-4399-9FAB-A5185AB4D092"
            Scope="perMachine"
            InstallerVersion="500">
@@ -44,6 +44,7 @@
       <ComponentRef Id="OfficeLauncherProgIdComponent" />
       <ComponentRef Id="DocxAssociationComponent" />
       <ComponentRef Id="XlsxAssociationComponent" />
+      <ComponentRef Id="DefaultAssociationsComponent" />
       <ComponentRef Id="PptxAssociationComponent" />
     </Feature>
 
@@ -115,7 +116,7 @@
     <Component Id="RegistryComponent" Directory="INSTALLFOLDER" Guid="*">
       <RegistryKey Root="HKLM" Key="SOFTWARE\OneSync">
         <RegistryValue Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
-        <RegistryValue Name="Version" Type="string" Value="1.4.2.0" />
+        <RegistryValue Name="Version" Type="string" Value="1.4.3.0" />
       </RegistryKey>
     </Component>
 
@@ -266,6 +267,17 @@
       </RegistryKey>
       <RegistryValue Root="HKLM" Key="SOFTWARE\OneSync\OfficeLauncher"
                      Name="PptxAssoc" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+    <!-- Windows 10/11 ignore the HKCR defaults above once someone has picked an
+         app themselves, and Office's first run often does that for them. The
+         default associations policy is the supported way round it: Windows
+         reapplies the file below at every sign-in. Removed on uninstall. -->
+    <Component Id="DefaultAssociationsComponent" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="DefaultAssociationsXml" Name="DefaultAssociations.xml"
+            Source="$(sys.SOURCEFILEDIR)DefaultAssociations.xml" KeyPath="yes" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Policies\Microsoft\Windows\System"
+                     Name="DefaultAssociationsConfiguration" Type="string"
+                     Value="[INSTALLFOLDER]DefaultAssociations.xml" />
     </Component>
 
     <!-- Launch OneSync via explorer.exe so the new process inherits the
