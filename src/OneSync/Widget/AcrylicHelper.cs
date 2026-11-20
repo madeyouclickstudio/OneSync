@@ -9,6 +9,12 @@ internal static class AcrylicHelper
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
     [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+    // NOMOVE | NOSIZE | NOZORDER | NOACTIVATE | FRAMECHANGED
+    private const uint SWP_REFRESH = 0x0002 | 0x0001 | 0x0004 | 0x0010 | 0x0020;
+
+    [DllImport("user32.dll")]
     private static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttribData data);
 
     private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
@@ -39,10 +45,12 @@ internal static class AcrylicHelper
 
     public static void Apply(IntPtr hwnd, bool dark = true)
     {
-        if (TryWin11Backdrop(hwnd, dark))
-            return;
+        if (!TryWin11Backdrop(hwnd, dark))
+            TryWin10Acrylic(hwnd, dark);
 
-        TryWin10Acrylic(hwnd, dark);
+        // The widgets never activate, so DWM won't redraw the backdrop after a
+        // theme change on its own. Nudge the frame so it does.
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_REFRESH);
     }
 
     private static bool TryWin11Backdrop(IntPtr hwnd, bool dark)

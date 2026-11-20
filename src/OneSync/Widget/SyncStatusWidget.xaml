@@ -31,6 +31,7 @@
         <SolidColorBrush x:Key="CriticalBrush" Color="#FF99A4"/>
         <SolidColorBrush x:Key="CriticalFill" Color="#1FFF99A4"/>
         <SolidColorBrush x:Key="SuccessBrush" Color="#6CCB5F"/>
+        <SolidColorBrush x:Key="ScrollThumb" Color="#5CFFFFFF"/>
 
         <FontFamily x:Key="TextFont">Segoe UI Variable Text, Segoe UI</FontFamily>
         <FontFamily x:Key="IconFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
@@ -111,13 +112,13 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="Bar" Background="#5CFFFFFF" CornerRadius="3"/>
+                        <Border x:Name="Bar" Background="{DynamicResource ScrollThumb}" CornerRadius="3"/>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bar" Property="Background" Value="#8BFFFFFF"/>
+                                <Setter TargetName="Bar" Property="Background" Value="{DynamicResource TertiaryText}"/>
                             </Trigger>
                             <Trigger Property="IsDragging" Value="True">
-                                <Setter TargetName="Bar" Property="Background" Value="#C5FFFFFF"/>
+                                <Setter TargetName="Bar" Property="Background" Value="{DynamicResource SecondaryText}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -206,7 +207,7 @@
 
     <Border CornerRadius="8" BorderThickness="1" BorderBrush="{DynamicResource Stroke}">
         <Border.Background>
-            <SolidColorBrush x:Name="WindowBg" Color="#D9202020"/>
+            <SolidColorBrush x:Name="WindowBg" Color="#B3202020"/>
         </Border.Background>
 
         <StackPanel Margin="16,14,16,14">
@@ -277,18 +278,8 @@
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <Border x:Name="FileRow" CornerRadius="4" Padding="8,6" Background="Transparent"
+                                Loaded="FileRow_Loaded"
                                 Cursor="Hand">
-                            <!-- New rows fade in rather than popping in -->
-                            <Border.Triggers>
-                                <EventTrigger RoutedEvent="Loaded">
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                                                             From="0" To="1" Duration="0:0:0.15"/>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </EventTrigger>
-                            </Border.Triggers>
                             <Border.InputBindings>
                                 <MouseBinding MouseAction="LeftClick" Command="{Binding OpenCommand}"/>
                             </Border.InputBindings>

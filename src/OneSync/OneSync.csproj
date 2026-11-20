@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -22,9 +22,9 @@
     <Product>OneSync</Product>
     <Company>madeyouclick studio</Company>
     <Copyright>Copyright (c) 2026 madeyouclick studio</Copyright>
-    <FileVersion>1.5.1.0</FileVersion>
-    <AssemblyVersion>1.5.1.0</AssemblyVersion>
-    <Version>1.5.1</Version>
+    <FileVersion>1.5.2.0</FileVersion>
+    <AssemblyVersion>1.5.2.0</AssemblyVersion>
+    <Version>1.5.2</Version>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -38,8 +38,15 @@
   <ItemGroup>
     <PackageReference Include="DokanNet" Version="2.2.1" />
     <PackageReference Include="Microsoft.Graph" Version="5.105.0" />
-    <!-- Graph pulls in an older Kiota with a redirect header leak (GHSA-7j59-v9qr-6fq9) -->
+    <!-- Graph pulls in an older Kiota with a redirect header leak (GHSA-7j59-v9qr-6fq9).
+         The Kiota packages ship together, so keep them all on the same version. -->
     <PackageReference Include="Microsoft.Kiota.Abstractions" Version="1.22.2" />
+    <PackageReference Include="Microsoft.Kiota.Authentication.Azure" Version="1.22.2" />
+    <PackageReference Include="Microsoft.Kiota.Http.HttpClientLibrary" Version="1.22.2" />
+    <PackageReference Include="Microsoft.Kiota.Serialization.Form" Version="1.22.2" />
+    <PackageReference Include="Microsoft.Kiota.Serialization.Json" Version="1.22.2" />
+    <PackageReference Include="Microsoft.Kiota.Serialization.Multipart" Version="1.22.2" />
+    <PackageReference Include="Microsoft.Kiota.Serialization.Text" Version="1.22.2" />
     <PackageReference Include="Microsoft.Identity.Client" Version="4.66.2" />
     <PackageReference Include="Microsoft.Identity.Client.Broker" Version="4.66.2" />
     <PackageReference Include="Microsoft.Identity.Client.Extensions.Msal" Version="4.66.2" />

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Interop;
@@ -26,6 +26,9 @@ internal static class WidgetTheme
         ["CriticalBrush"] = "#FF99A4",
         ["CriticalFill"] = "#1FFF99A4",
         ["SuccessBrush"] = "#6CCB5F",
+        ["ScrollThumb"] = "#5CFFFFFF",
+        ["HoverFill"] = "#22FFFFFF",
+        ["HoverFillPressed"] = "#33FFFFFF",
     };
 
     private static readonly Dictionary<string, string> Light = new()
@@ -41,6 +44,9 @@ internal static class WidgetTheme
         ["CriticalBrush"] = "#C42B1C",
         ["CriticalFill"] = "#14C42B1C",
         ["SuccessBrush"] = "#0F7B0F",
+        ["ScrollThumb"] = "#48000000",
+        ["HoverFill"] = "#0F000000",
+        ["HoverFillPressed"] = "#18000000",
     };
 
     // The status colours the view model uses are the dark theme ones.

@@ -118,6 +118,14 @@ public partial class SyncStatusWidget : Window
         }
     }
 
+    // New rows fade in, unless the user has turned animations off in Windows.
+    private void FileRow_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (!SystemParameters.ClientAreaAnimation) return;
+        ((UIElement)sender).BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150)));
+    }
+
     private void UpdateVisibility()
     {
         // The ViewModel's IsVisible can flip after the window has been closed
