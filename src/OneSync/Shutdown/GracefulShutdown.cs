@@ -22,6 +22,7 @@ internal sealed class GracefulShutdown : IDisposable
     private readonly StorageCleanup? _cleanup;
     private readonly ILogger _logger;
     private readonly Action _requestExit;
+    private readonly Action? _beforeFlush;
 
     private SessionEndingEventHandler? _sessionEnding;
     private EventHandler? _processExit;
@@ -31,13 +32,14 @@ internal sealed class GracefulShutdown : IDisposable
     private IntPtr _hiddenWindowHandle;
 
     public GracefulShutdown(AppConfig config, SyncEngine sync, ILogger logger, Action requestExit,
-        StorageCleanup? cleanup = null)
+        StorageCleanup? cleanup = null, Action? beforeFlush = null)
     {
         _config = config;
         _sync = sync;
         _cleanup = cleanup;
         _logger = logger;
         _requestExit = requestExit;
+        _beforeFlush = beforeFlush;
     }
 
     public void Register()
@@ -147,6 +149,12 @@ internal sealed class GracefulShutdown : IDisposable
         // written and the next session falsely reports "unclean shutdown".
         try { _cleanup?.MarkCleanShutdown(); }
         catch (Exception ex) { _logger.Warning(ex, "Could not write clean_shutdown marker on signal"); }
+
+        // Put the shell folders back now. At logoff Windows ends the process once
+        // this handler returns, so the restore in Main's finally never runs, and
+        // Explorer would start the next session pointing at an unmounted drive.
+        try { _beforeFlush?.Invoke(); }
+        catch (Exception ex) { _logger.Warning(ex, "Shell folder restore on shutdown failed"); }
 
         var pending = _sync.Queue.CountPending();
         if (pending > 0)

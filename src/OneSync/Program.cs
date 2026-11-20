@@ -599,7 +599,9 @@ internal static class Program
                 catch { }
             };
 
-            shutdown = new GracefulShutdown(config, syncEngine, logger, requestExit, cleanup);
+            var redirToRestore = config.Cleanup.CleanOnLogoff ? folderRedir : null;
+            shutdown = new GracefulShutdown(config, syncEngine, logger, requestExit, cleanup,
+                redirToRestore is null ? null : redirToRestore.Restore);
             shutdown.Register();
 
             logger.Information("=== OneSync running ===");

@@ -155,11 +155,13 @@ internal sealed class FolderRedirector
             using var hkcuShell = Registry.CurrentUser.OpenSubKey(ShellFoldersKey, writable: true);
             using var hkcuApplied = Registry.CurrentUser.OpenSubKey(AppliedKey, writable: true);
 
-            if (hkcuBackup is null || hkcuUserShell is null) return;
+            if (hkcuBackup is null || hkcuUserShell is null || hkcuApplied is null) return;
 
             int restored = 0;
             foreach (var name in hkcuBackup.GetValueNames())
             {
+                // Only what's still redirected; shutdown can call this twice.
+                if (hkcuApplied?.GetValue(name) is null) continue;
                 var original = hkcuBackup.GetValue(name) as string;
                 if (string.IsNullOrEmpty(original)) continue;
 
