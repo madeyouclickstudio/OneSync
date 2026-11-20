@@ -532,10 +532,9 @@ internal sealed class TrayIcon : IDisposable
     {
         var confirm = MessageBox.Show(
             owner: null,
-            text: $"Re-fetch all {drive.Letter}: metadata from the cloud?\n\n" +
-                  "Local files are preserved — only the cloud-tracked metadata is wiped " +
-                  "and re-built on the next delta poll (within ~5 minutes). " +
-                  "Takes a few minutes for a large library.\n\n" +
+            text: $"Refresh everything OneSync knows about {drive.Letter}: from the cloud?\n\n" +
+                  "Your files and any changes still uploading are kept. Each folder is " +
+                  "listed again from the cloud the next time you open it.\n\n" +
                   "Continue?",
             caption: "OneSync — Force full resync",
             buttons: MessageBoxButtons.YesNo,

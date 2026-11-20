@@ -102,7 +102,7 @@ internal sealed class StorageCleanup
         }
 
         var preserveSet = BuildPreserveSet(preserveLocalPaths);
-        _logger.Information("Logoff cleanup running for user '{User}' (preserving {Count} files with pending uploads)",
+        _logger.Information("Logoff cleanup running for user '{User}' (keeping {Count} items not yet in the cloud)",
             _currentUser, preserveSet.Count);
         DeleteDriveStorage(_config.LocalStorageRoot, preserveSet);
     }
@@ -266,7 +266,7 @@ internal sealed class StorageCleanup
                 var full = Path.GetFullPath(file);
                 if (preserveSet.Contains(full))
                 {
-                    _logger.Debug("Preserving file (has pending upload): {Path}", full);
+                    _logger.Debug("Keeping {Path}: not yet in the cloud", full);
                     continue;
                 }
                 TryDeleteFile(file);

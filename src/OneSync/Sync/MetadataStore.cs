@@ -134,7 +134,8 @@ internal sealed class MetadataStore : IDisposable
         lock (_writeLock) _items.Upsert(item);
     }
 
-    public void MarkHydrated(string driveConfigId, string relativePath, string? actualETag = null)
+    public void MarkHydrated(string driveConfigId, string relativePath, string? actualETag = null,
+        FileInfo? localFile = null)
     {
         var key = RemoteItem.MakeKey(driveConfigId, relativePath);
         lock (_writeLock)
@@ -142,10 +143,13 @@ internal sealed class MetadataStore : IDisposable
             var existing = _items.FindById(key);
             if (existing == null) return;
             existing.Hydrated = true;
+            existing.RemoteChangedSinceBaseline = false;
             existing.LastSyncedAt = DateTime.UtcNow;
             existing.LastAccessedAt = DateTime.UtcNow;
             if (!string.IsNullOrEmpty(actualETag))
                 existing.ETag = actualETag;
+            if (localFile != null)
+                LocalState.SetBaseline(existing, localFile);
             _items.Update(existing);
         }
     }
@@ -162,6 +166,7 @@ internal sealed class MetadataStore : IDisposable
             var existing = _items.FindById(key);
             if (existing == null) return;
             existing.Hydrated = false;
+            LocalState.ClearBaseline(existing);
             existing.LastSyncedAt = DateTime.UtcNow;
             _items.Update(existing);
         }
@@ -197,48 +202,160 @@ internal sealed class MetadataStore : IDisposable
         }
     }
 
-    /// <summary>Records a new ETag after a successful upload (the server returns
-    /// the post-upload eTag in the response). Creates a metadata record if none
-    /// exists yet (first upload of a brand-new local file).</summary>
-    public void UpdateETag(string driveConfigId, string relativePath, string newETag,
-        string? remoteItemId = null, long fileSizeBytes = 0)
+    /// <summary>
+    /// Records a successful upload: the server's new eTag, id and hash, plus the
+    /// local file's length and write time as they were when we read it to upload.
+    /// If the file changed while it was uploading, that baseline no longer matches
+    /// and the next pass uploads it again.
+    /// </summary>
+    public void RecordUpload(string driveConfigId, string relativePath, UploadResult result,
+        long localLength, long localWriteTicks)
     {
-        if (string.IsNullOrEmpty(newETag)) return;
         var key = RemoteItem.MakeKey(driveConfigId, relativePath);
         lock (_writeLock)
         {
-            var existing = _items.FindById(key);
-            if (existing != null)
+            var item = _items.FindById(key) ?? new RemoteItem
             {
-                existing.ETag = newETag;
-                if (!string.IsNullOrEmpty(remoteItemId)) existing.RemoteItemId = remoteItemId;
-                if (fileSizeBytes > 0) existing.Size = fileSizeBytes;
-                existing.Hydrated = true;
-                existing.LastSyncedAt = DateTime.UtcNow;
-                // Bump LastAccessedAt too: a file we just successfully uploaded
-                // is the most recently-touched content on disk. Without this
-                // bump, LruEvictionService would pick freshly-uploaded files
-                // as victims immediately on a near-full disk.
-                existing.LastAccessedAt = DateTime.UtcNow;
-                _items.Update(existing);
+                Key = key,
+                DriveConfigId = driveConfigId,
+                RelativePath = relativePath,
+                Name = Path.GetFileName(relativePath.Replace('/', Path.DirectorySeparatorChar)),
+                PlaceholderCreated = true,
+            };
+            if (!string.IsNullOrEmpty(result.ETag)) item.ETag = result.ETag;
+            if (!string.IsNullOrEmpty(result.CTag)) item.CTag = result.CTag;
+            if (!string.IsNullOrEmpty(result.RemoteItemId)) item.RemoteItemId = result.RemoteItemId;
+            if (!string.IsNullOrEmpty(result.ParentRemoteItemId)) item.ParentRemoteItemId = result.ParentRemoteItemId;
+            if (!string.IsNullOrEmpty(result.WebUrl)) item.WebUrl = result.WebUrl;
+            if (!string.IsNullOrEmpty(result.QuickXorHash)) item.ContentHash = result.QuickXorHash;
+            if (result.LastModified != default) item.LastModifiedDateTime = result.LastModified;
+            if (result.Created != default) item.CreatedDateTime = result.Created;
+            item.Size = result.Size >= 0 ? result.Size : localLength;
+            item.IsFolder = false;
+            item.Hydrated = true;
+            item.RemoteChangedSinceBaseline = false;
+            item.LocalLength = localLength;
+            item.LocalWriteTicks = localWriteTicks;
+            item.LastSyncedAt = DateTime.UtcNow;
+            item.LastAccessedAt = DateTime.UtcNow;
+            _items.Upsert(item);
+        }
+    }
+
+    /// <summary>Refreshes the cloud identifiers of an item after a rename or move,
+    /// leaving its content baseline alone.</summary>
+    public void UpdateRemoteFields(string driveConfigId, string relativePath, UploadResult result)
+    {
+        var key = RemoteItem.MakeKey(driveConfigId, relativePath);
+        lock (_writeLock)
+        {
+            var item = _items.FindById(key);
+            if (item is null) return;
+            if (!string.IsNullOrEmpty(result.ETag)) item.ETag = result.ETag;
+            if (!string.IsNullOrEmpty(result.CTag)) item.CTag = result.CTag;
+            if (!string.IsNullOrEmpty(result.RemoteItemId)) item.RemoteItemId = result.RemoteItemId;
+            if (!string.IsNullOrEmpty(result.ParentRemoteItemId)) item.ParentRemoteItemId = result.ParentRemoteItemId;
+            if (!string.IsNullOrEmpty(result.WebUrl)) item.WebUrl = result.WebUrl;
+            item.LastSyncedAt = DateTime.UtcNow;
+            _items.Update(item);
+        }
+    }
+
+    /// <summary>Records a folder we created in the cloud.</summary>
+    public void RecordFolder(string driveConfigId, string relativePath, UploadResult result)
+    {
+        var key = RemoteItem.MakeKey(driveConfigId, relativePath);
+        lock (_writeLock)
+        {
+            var item = _items.FindById(key) ?? new RemoteItem
+            {
+                Key = key,
+                DriveConfigId = driveConfigId,
+                RelativePath = relativePath,
+                Name = Path.GetFileName(relativePath.Replace('/', Path.DirectorySeparatorChar)),
+            };
+            item.IsFolder = true;
+            item.PlaceholderCreated = true;
+            if (!string.IsNullOrEmpty(result.ETag)) item.ETag = result.ETag;
+            if (!string.IsNullOrEmpty(result.RemoteItemId)) item.RemoteItemId = result.RemoteItemId;
+            if (!string.IsNullOrEmpty(result.ParentRemoteItemId)) item.ParentRemoteItemId = result.ParentRemoteItemId;
+            if (!string.IsNullOrEmpty(result.WebUrl)) item.WebUrl = result.WebUrl;
+            item.LastSyncedAt = DateTime.UtcNow;
+            _items.Upsert(item);
+        }
+    }
+
+    /// <summary>Moves an item (and, for a folder, everything under it) to a new path
+    /// after a rename or move.</summary>
+    public void MovePath(string driveConfigId, string oldPath, string newPath)
+    {
+        lock (_writeLock)
+        {
+            var prefix = oldPath.TrimEnd('/') + "/";
+            var affected = _items.Find(i => i.DriveConfigId == driveConfigId).Where(i =>
+                    i.RelativePath.Equals(oldPath, StringComparison.OrdinalIgnoreCase) ||
+                    i.RelativePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var item in affected)
+            {
+                _items.Delete(item.Key);
+                item.RelativePath = newPath + item.RelativePath[oldPath.Length..];
+                if (item.RelativePath.Equals(newPath, StringComparison.OrdinalIgnoreCase))
+                    item.Name = Path.GetFileName(newPath.Replace('/', Path.DirectorySeparatorChar));
+                item.Key = RemoteItem.MakeKey(driveConfigId, item.RelativePath);
+                _items.Upsert(item);
             }
-            else
+        }
+    }
+
+    /// <summary>Deletes an item and, for a folder, everything recorded under it.</summary>
+    public int DeleteTree(string driveConfigId, string relativePath)
+    {
+        lock (_writeLock)
+        {
+            var prefix = relativePath.TrimEnd('/') + "/";
+            var doomed = _items.Find(i => i.DriveConfigId == driveConfigId).Where(i =>
+                    i.RelativePath.Equals(relativePath, StringComparison.OrdinalIgnoreCase) ||
+                    i.RelativePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(i => i.Key)
+                .ToList();
+            foreach (var key in doomed) _items.Delete(key);
+            return doomed.Count;
+        }
+    }
+
+    /// <summary>
+    /// Drops every record except files with a local copy and the folders above
+    /// them (or every folder, with <paramref name="keepFolders"/>), so the next
+    /// browse of each folder fetches a fresh listing while the records that
+    /// protect local edits survive.
+    /// </summary>
+    public int PruneToLocalCopies(string? driveConfigId = null, bool keepFolders = false)
+    {
+        lock (_writeLock)
+        {
+            var all = driveConfigId is null
+                ? _items.FindAll().ToList()
+                : _items.Find(i => i.DriveConfigId == driveConfigId).ToList();
+
+            var keep = new HashSet<string>(StringComparer.Ordinal);
+            if (keepFolders)
+                foreach (var folder in all.Where(i => i.IsFolder)) keep.Add(folder.Key);
+            foreach (var item in all.Where(i => !i.IsFolder && (i.Hydrated || LocalState.HasBaseline(i))))
             {
-                var name = Path.GetFileName(relativePath.Replace('/', Path.DirectorySeparatorChar));
-                _items.Upsert(new RemoteItem
+                keep.Add(item.Key);
+                var parent = Util.PathUtil.ParentOf(item.RelativePath);
+                while (parent != "/")
                 {
-                    Key = key,
-                    DriveConfigId = driveConfigId,
-                    RelativePath = relativePath,
-                    Name = name,
-                    RemoteItemId = remoteItemId ?? string.Empty,
-                    ETag = newETag,
-                    Size = fileSizeBytes,
-                    Hydrated = true,
-                    PlaceholderCreated = true,
-                    LastSyncedAt = DateTime.UtcNow,
-                });
+                    if (!keep.Add(RemoteItem.MakeKey(item.DriveConfigId, parent))) break;
+                    parent = Util.PathUtil.ParentOf(parent);
+                }
             }
+
+            int removed = 0;
+            foreach (var item in all)
+                if (!keep.Contains(item.Key) && _items.Delete(item.Key)) removed++;
+            return removed;
         }
     }
 
@@ -337,19 +454,36 @@ internal sealed class MetadataStore : IDisposable
             _enumState.DeleteMany(i => i.DriveConfigId == driveConfigId);
     }
 
-    /// <summary>Delete all RemoteItem and FolderEnumerationState records for a single drive.
-    /// Used by Force-resync — the next delta poll re-fetches everything from /delta.
-    /// Local hydrated files and placeholders on disk are NOT touched; they get rebuilt
-    /// as the delta poll re-discovers each item.</summary>
+    /// <summary>Forgets what we know about a drive's cloud listing so every folder
+    /// is fetched again when next opened. Records that protect local copies stay.</summary>
     public void ClearForDrive(string driveConfigId)
     {
         lock (_writeLock)
         {
-            var itemsDeleted = _items.DeleteMany(i => i.DriveConfigId == driveConfigId);
+            var itemsDeleted = PruneToLocalCopies(driveConfigId, keepFolders: true);
             var enumDeleted = _enumState.DeleteMany(i => i.DriveConfigId == driveConfigId);
             _logger.Information(
                 "Cleared metadata for drive {DriveId}: {Items} items, {Enum} enumeration records",
                 driveConfigId, itemsDeleted, enumDeleted);
+        }
+    }
+
+    public void ClearAllEnumerationState()
+    {
+        lock (_writeLock) _enumState.DeleteAll();
+    }
+
+    /// <summary>Reclaims the space left by deleted records. Best effort.</summary>
+    public void Compact()
+    {
+        lock (_writeLock)
+        {
+            try
+            {
+                _db.Checkpoint();
+                _db.Rebuild();
+            }
+            catch { }
         }
     }
 

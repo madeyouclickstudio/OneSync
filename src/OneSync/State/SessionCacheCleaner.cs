@@ -9,16 +9,11 @@ using Serilog;
 namespace OneSync.State;
 
 /// <summary>
-/// "Session cache" lifecycle: the per-user metadata.db is treated as session-scoped
-/// rather than persistent. On startup, if the previous session ended gracefully
-/// (or the cache is older than the staleness threshold), wipe metadata.db, drop
-/// every drive's delta token, and remove 0-byte placeholder files. Pending uploads
-/// (sync_queue.db) and hydrated file content are always preserved.
-///
-/// Rationale: on persistent profiles (no roaming) the cache grows unbounded as
-/// LiteDB fragments under churn — observed at ~895 MB for one user. Wiping it
-/// each session bounds disk usage. Lazy-fallback rebuilds whatever the user
-/// actually touches; everything else stays out of the cache by design.
+/// Starts each session with a small cache. Records for files that are only in
+/// the cloud are dropped along with their placeholders, and folders are listed
+/// again as the user opens them. Files held locally keep their records, so the
+/// app still knows which of them have changes waiting to upload. Pending
+/// uploads in sync_queue.db are always kept.
 /// </summary>
 internal static class SessionCacheCleaner
 {
@@ -46,7 +41,6 @@ internal static class SessionCacheCleaner
         }
 
         var metadataPath = Path.Combine(stateDir, "metadata.db");
-        var metadataLogPath = metadataPath + "-log";
         if (!File.Exists(metadataPath))
         {
             logger.Debug("No metadata.db present — nothing to wipe");
@@ -87,60 +81,57 @@ internal static class SessionCacheCleaner
             logger.Warning(ex, "Failed clearing delta tokens — continuing wipe");
         }
 
-        // 2) Delete metadata.db (LiteDB will create a fresh one when SyncEngine opens it).
-        TryDelete(metadataPath, logger);
-        TryDelete(metadataLogPath, logger);
-
-        // 3) Walk each drive's local backing dir and remove 0-byte placeholders +
-        //    empty directories left behind. Hydrated files (any non-zero length)
-        //    are preserved so the user keeps their offline content.
-        foreach (var drive in drives)
+        // 2) Drop cloud-only placeholders and their records; keep everything
+        //    with content on this PC.
+        try
         {
-            if (string.IsNullOrEmpty(drive.LocalRootPath)) continue;
-            if (!Directory.Exists(drive.LocalRootPath)) continue;
-            try
+            using var metadata = new MetadataStore(metadataPath, logger);
+            foreach (var drive in drives)
             {
-                WipePlaceholdersUnder(drive, logger);
+                if (string.IsNullOrEmpty(drive.LocalRootPath) || !Directory.Exists(drive.LocalRootPath)) continue;
+                try { WipePlaceholdersUnder(drive, metadata, logger); }
+                catch (Exception ex) { logger.Warning(ex, "Placeholder wipe failed under {Path}", drive.LocalRootPath); }
             }
-            catch (Exception ex)
-            {
-                logger.Warning(ex, "Placeholder wipe failed under {Path}", drive.LocalRootPath);
-            }
+
+            var pruned = metadata.PruneToLocalCopies();
+            metadata.ClearAllEnumerationState();
+            metadata.Compact();
+            logger.Information("Session cache trimmed: {Count} cloud-only records dropped", pruned);
+        }
+        catch (Exception ex)
+        {
+            logger.Warning(ex, "Could not trim metadata.db; starting with it as it is");
         }
     }
 
-    private static void WipePlaceholdersUnder(DriveConfig drive, ILogger logger)
+    private static void WipePlaceholdersUnder(DriveConfig drive, MetadataStore metadata, ILogger logger)
     {
         var root = drive.LocalRootPath;
         var filesDeleted = 0;
-        var hydratedKept = 0;
+        var kept = 0;
 
-        // Phase 1: delete 0-byte files (placeholders). Hydrated files have content
-        // (>0 bytes for any real Office doc, image, etc.) and are kept.
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
             try
             {
                 var fi = new FileInfo(file);
-                if (fi.Length == 0)
+                if (LocalState.IsPlaceholder(fi) || IsOldStylePlaceholder(drive, metadata, root, fi) ||
+                    LocalState.IsInterruptedDownload(fi, metadata.Get(drive.ConfigId, ToRelative(root, fi.FullName))))
                 {
                     fi.Delete();
                     filesDeleted++;
                 }
                 else
                 {
-                    hydratedKept++;
+                    kept++;
                 }
             }
-            catch
-            {
-                // Per-file failures (file locked, permission denied, etc.) are non-fatal —
-                // a single stuck file shouldn't abort the wipe for the rest of the tree.
-            }
+            catch { }
         }
 
-        // Phase 2: remove now-empty directories, deepest first. Preserve the drive
-        // root itself even if empty (Dokan / mount logic needs it to exist).
+        // Empty folders we know from the cloud are recreated when their parent is
+        // listed. Empty folders with no cloud record were made here and may not
+        // have been created in the cloud yet, so they stay.
         var dirsDeleted = 0;
         var subDirs = Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories)
             .OrderByDescending(d => d.Length)
@@ -149,22 +140,33 @@ internal static class SessionCacheCleaner
         {
             try
             {
-                if (!Directory.EnumerateFileSystemEntries(dir).Any())
+                if (Directory.EnumerateFileSystemEntries(dir).Any()) continue;
+                var meta = metadata.Get(drive.ConfigId, ToRelative(root, dir));
+                if (meta is { IsFolder: true } && !string.IsNullOrEmpty(meta.RemoteItemId))
                 {
                     Directory.Delete(dir);
                     dirsDeleted++;
                 }
             }
-            catch
-            {
-                // Same as files — non-fatal.
-            }
+            catch { }
         }
 
         logger.Information(
-            "Session cache wiped for {Letter}: {LocalRoot} — {Placeholders} placeholders deleted, {Hydrated} hydrated files kept, {EmptyDirs} empty dirs removed",
-            drive.Letter, root, filesDeleted, hydratedKept, dirsDeleted);
+            "Session cache trimmed for {Letter}: {Placeholders} placeholders deleted, {Kept} local files kept, {EmptyDirs} empty folders removed",
+            drive.Letter, filesDeleted, kept, dirsDeleted);
     }
+
+    /// <summary>An empty, non-sparse file that our records say is a cloud-only
+    /// file with content. Older versions made placeholders without the sparse flag.</summary>
+    private static bool IsOldStylePlaceholder(DriveConfig drive, MetadataStore metadata, string root, FileInfo fi)
+    {
+        if (fi.Length != 0) return false;
+        var meta = metadata.Get(drive.ConfigId, ToRelative(root, fi.FullName));
+        return meta is { IsFolder: false, Hydrated: false } && meta.Size > 0 && !LocalState.HasBaseline(meta);
+    }
+
+    private static string ToRelative(string root, string fullPath) =>
+        Util.PathUtil.NormalizeRelative(Path.GetRelativePath(root, fullPath));
 
     /// <summary>Defensive sync_queue.db compaction: if the last-compact marker is
     /// missing or older than <see cref="SyncQueueCompactionMaxAgeDays"/>, open

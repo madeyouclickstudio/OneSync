@@ -23,10 +23,28 @@ internal sealed class RemoteItem
     public bool IsFolder { get; set; }
     public long Size { get; set; }
 
+    /// <summary>File's own created/modified times (fileSystemInfo), falling back to
+    /// the server times when the item has none. These are what Explorer shows.</summary>
     public DateTime CreatedDateTime { get; set; }
     public DateTime LastModifiedDateTime { get; set; }
+
     public string? ETag { get; set; }
-    public string? ContentHash { get; set; } // sha256/quickXor
+
+    /// <summary>Changes only when the file's content changes (eTag also changes on
+    /// metadata-only updates).</summary>
+    public string? CTag { get; set; }
+
+    public string? ContentHash { get; set; } // quickXorHash, or sha256 where that's all we get
+
+    /// <summary>Length and last-write time of the local file at the moment it last
+    /// matched the cloud (after a download or an upload). A local file that no
+    /// longer matches these has edits the cloud doesn't have yet.</summary>
+    public long LocalLength { get; set; }
+    public long LocalWriteTicks { get; set; }
+
+    /// <summary>The cloud copy changed while the local copy had unsynced edits.
+    /// The next upload goes through conflict handling instead of overwriting.</summary>
+    public bool RemoteChangedSinceBaseline { get; set; }
 
     /// <summary>SharePoint / OneDrive web URL for this item. Used by OfficeLauncher
     /// to build `ms-word:ofe|u|<url>` redirects so Office opens the cloud copy

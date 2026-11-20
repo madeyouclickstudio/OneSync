@@ -37,6 +37,8 @@ internal sealed class SyncEngine : IAsyncDisposable
     private readonly DeltaPoller _delta;
     private readonly LruEvictionService _eviction;
     private System.Threading.Timer? _manifestPushTimer;
+    private System.Threading.Timer? _reconcileTimer;
+    private int _reconciling;
     private readonly List<LocalWatcher> _watchers = new();
     private UploadWorker? _uploader;
     private Task? _uploaderTask;
@@ -85,24 +87,132 @@ internal sealed class SyncEngine : IAsyncDisposable
     }
 
     /// <summary>
-    /// Returns the local NTFS paths of every file that has a pending or retrying
-    /// upload in the queue. Used by graceful shutdown to preserve those files
-    /// from logoff cleanup so the next login can finish the upload.
+    /// Local paths that must survive logoff cleanup: anything still waiting to
+    /// go up, and any file or folder the cloud doesn't have as it is here.
     /// </summary>
     public IReadOnlyCollection<string> GetPendingUploadLocalPaths()
     {
-        var result = new List<string>();
-        var pending = _queue.GetPending(max: 10_000);
-        foreach (var op in pending)
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var op in _queue.GetOutstanding())
         {
-            if (op.Type != SyncOpType.Upload) continue;
+            if (op.Type != SyncOpType.Upload && op.Type != SyncOpType.RemoteCreateFolder) continue;
             var drive = _drives.FirstOrDefault(d => d.ConfigId == op.DriveConfigId);
             if (drive == null) continue;
-            var winRel = Util.PathUtil.ToWindowsRelative(op.RelativePath);
-            var localPath = System.IO.Path.Combine(drive.LocalRootPath, winRel);
-            if (System.IO.File.Exists(localPath)) result.Add(localPath);
+            var localPath = PlaceholderManager.LocalPathFor(drive, op.RelativePath);
+            if (File.Exists(localPath) || Directory.Exists(localPath)) result.Add(localPath);
+        }
+        foreach (var drive in _drives)
+        {
+            foreach (var (fullPath, _, _) in FindUnsyncedLocal(drive))
+                result.Add(fullPath);
         }
         return result;
+    }
+
+    /// <summary>Hands a change seen by the drive itself to that drive's watcher.</summary>
+    public void NotifyLocalChange(DriveConfig drive, string fullPath)
+    {
+        var watcher = _watchers.FirstOrDefault(w => w.Drive.ConfigId == drive.ConfigId);
+        watcher?.NotifyChanged(fullPath);
+    }
+
+    /// <summary>
+    /// Walks a drive's local folder for anything the cloud doesn't have yet:
+    /// files edited or created locally, and folders with no cloud record.
+    /// </summary>
+    private IEnumerable<(string fullPath, string relativePath, bool isFolder)> FindUnsyncedLocal(DriveConfig drive)
+    {
+        var root = drive.LocalRootPath;
+        if (!Directory.Exists(root)) yield break;
+
+        var stack = new Stack<string>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var dir = stack.Pop();
+            List<FileSystemInfo> entries;
+            try { entries = new DirectoryInfo(dir).EnumerateFileSystemInfos().ToList(); }
+            catch { continue; }
+
+            foreach (var entry in entries)
+            {
+                if (LocalWatcher.IsIgnoredName(entry.FullName, _config.SyncSettings)) continue;
+                var rel = PathUtil.NormalizeRelative(Path.GetRelativePath(root, entry.FullName));
+                if (rel.Equals("/" + OneSyncDokanFS.ProtectedFolderName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var meta = _metadata.Get(drive.ConfigId, rel);
+                if (entry is DirectoryInfo)
+                {
+                    if (meta is null || !meta.IsFolder) yield return (entry.FullName, rel, true);
+                    stack.Push(entry.FullName);
+                    continue;
+                }
+
+                var fi = (FileInfo)entry;
+                if ((fi.Attributes & FileAttributes.Temporary) != 0) continue;
+                if (meta?.RemoteChangedSinceBaseline == true || LocalState.IsDirty(fi, meta))
+                    yield return (entry.FullName, rel, false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Queues anything on disk that the cloud is missing. A backstop for changes
+    /// the watcher never reported: a buffer overflow, changes made while the app
+    /// was closing, or a crash before a debounced change was queued.
+    /// </summary>
+    public int ReconcileLocalChanges(DriveConfig? only = null)
+    {
+        if (Interlocked.Exchange(ref _reconciling, 1) == 1) return 0;
+        int queued = 0;
+        try
+        {
+            var outstanding = new HashSet<string>(
+                _queue.GetOutstanding().Select(o => o.DriveConfigId + "|" + o.RelativePath),
+                StringComparer.OrdinalIgnoreCase);
+            var maxBytes = _config.SyncSettings.MaxFileSizeMB * 1024L * 1024L;
+
+            foreach (var drive in _drives)
+            {
+                if (only != null && drive.ConfigId != only.ConfigId) continue;
+                foreach (var (fullPath, rel, isFolder) in FindUnsyncedLocal(drive))
+                {
+                    if (outstanding.Contains(drive.ConfigId + "|" + rel)) continue;
+                    if (_suppressor.IsSuppressed(fullPath)) continue;
+
+                    long size = 0;
+                    if (!isFolder)
+                    {
+                        try { size = new FileInfo(fullPath).Length; } catch { continue; }
+                        if (size > maxBytes) continue;
+                    }
+
+                    _queue.Enqueue(new SyncOperation
+                    {
+                        Type = isFolder ? SyncOpType.RemoteCreateFolder : SyncOpType.Upload,
+                        DriveConfigId = drive.ConfigId,
+                        DriveLetter = drive.Letter,
+                        RelativePath = rel,
+                        Priority = drive.Priority,
+                        FileSizeBytes = size,
+                    });
+                    queued++;
+                    _logger.Information("Found unsynced local {Kind}: {Drive}:{Path}",
+                        isFolder ? "folder" : "file", drive.Letter, rel);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Local reconcile failed");
+        }
+        finally
+        {
+            Volatile.Write(ref _reconciling, 0);
+        }
+        if (queued > 0)
+            _logger.Information("Local reconcile queued {Count} changes", queued);
+        return queued;
     }
 
     public SyncEngine(
@@ -127,10 +237,8 @@ internal sealed class SyncEngine : IAsyncDisposable
 
         _graph = new GraphHttpClient(auth, config.SyncSettings, logger);
 
-        // Drop stale ops: hydration temp files, ops for unknown drives, queued
-        // uploads whose local file is gone/empty, and terminally-Failed ops for
-        // files that match an exclude pattern (e.g. browser .crdownload/.part temp
-        // files that should never have entered the queue and can never succeed).
+        // Drop ops that can never succeed: old hydration temp files, unknown
+        // drives, uploads whose file has gone, and failures for excluded names.
         var excludePatterns = _config.SyncSettings.ExcludePatterns;
         var removed = _queue.RemoveStaleOperations(op =>
         {
@@ -150,7 +258,7 @@ internal sealed class SyncEngine : IAsyncDisposable
             {
                 var winRel = Util.PathUtil.ToWindowsRelative(op.RelativePath);
                 var localPath = Path.Combine(drive.LocalRootPath, winRel);
-                return !File.Exists(localPath) || new FileInfo(localPath).Length == 0;
+                return !File.Exists(localPath);
             }
 
             return false;
@@ -161,10 +269,10 @@ internal sealed class SyncEngine : IAsyncDisposable
             ? new ThumbnailPrefetcher(_graph, _drives,
                 config.SyncSettings.MaxConcurrentThumbnailFetches, logger)
             : null;
-        _placeholders = new PlaceholderManager(_metadata, logger, _thumbnails, _drives);
         _suppressor = new LocalChangeSuppressor();
+        _placeholders = new PlaceholderManager(_metadata, _suppressor, logger, _thumbnails);
         _hydration = new HydrationService(_graph, _metadata, _placeholders, _drives, _suppressor, config.SyncSettings, logger);
-        _conflictResolver = new ConflictResolver(_metadata, _hydration, _queue, _suppressor, logger);
+        _conflictResolver = new ConflictResolver(_metadata, _placeholders, _queue, _suppressor, logger);
         _manifest = new PendingManifestService(_graph, logger);
         _recycleBin = new RecycleBinService(_graph, _metadata, _queue, _drives, _auth.Account?.Username, logger);
         _delta = new DeltaPoller(_graph, _metadata, _queue, _placeholders, _drives,
@@ -187,9 +295,12 @@ internal sealed class SyncEngine : IAsyncDisposable
     public LocalChangeSuppressor Suppressor => _suppressor;
     public PlaceholderManager Placeholders => _placeholders;
 
+    /// <summary>Forgets everything learned from the cloud except the records of
+    /// files held locally, so the next listings rebuild the rest.</summary>
     public void ResetMetadata()
     {
-        _metadata.ClearAll();
+        _metadata.PruneToLocalCopies(keepFolders: true);
+        _metadata.ClearAllEnumerationState();
     }
 
     public void Start()
@@ -206,6 +317,7 @@ internal sealed class SyncEngine : IAsyncDisposable
         foreach (var drive in _drives)
         {
             var watcher = new LocalWatcher(drive, _queue, _config.SyncSettings, _logger, _suppressor, _metadata);
+            watcher.EventsLost += d => Task.Run(() => ReconcileLocalChanges(d));
             watcher.Start();
             _watchers.Add(watcher);
         }
@@ -215,6 +327,9 @@ internal sealed class SyncEngine : IAsyncDisposable
 
         _delta.Start();
         _eviction.Start();
+
+        _reconcileTimer = new System.Threading.Timer(_ => ReconcileLocalChanges(), null,
+            TimeSpan.FromSeconds(20), TimeSpan.FromMinutes(10));
 
         // Push manifest now + every 2 minutes so other machines see this
         // machine's pending uploads even if it never gets a chance to send a final
@@ -275,38 +390,24 @@ internal sealed class SyncEngine : IAsyncDisposable
             "Rebuilding placeholders for {Letter}: from {Count} metadata records (local appears wiped)",
             drive.Letter, metadataCount);
 
-        _suppressor.Suppress(drive.LocalRootPath);
-        try
+        int rebuilt = 0;
+        foreach (var item in _metadata.GetForDrive(drive.ConfigId).OrderByDescending(i => i.IsFolder))
         {
-            int rebuilt = 0;
-            foreach (var item in _metadata.GetForDrive(drive.ConfigId).Where(i => i.IsFolder))
-            {
-                item.Hydrated = false;
-                _placeholders.CreateOrUpdate(drive, item);
-                rebuilt++;
-            }
-            foreach (var item in _metadata.GetForDrive(drive.ConfigId).Where(i => !i.IsFolder))
-            {
-                item.Hydrated = false;
-                _placeholders.CreateOrUpdate(drive, item);
-                rebuilt++;
-            }
-            _logger.Information("Rebuilt {Count} placeholders for {Letter}:", rebuilt, drive.Letter);
+            try { _placeholders.CreateOrUpdate(drive, item); rebuilt++; }
+            catch (Exception ex) { _logger.Debug(ex, "Rebuild failed for {Path}", item.RelativePath); }
         }
-        finally
-        {
-            _ = Task.Delay(TimeSpan.FromSeconds(3))
-                .ContinueWith(_ => _suppressor.Release(drive.LocalRootPath));
-        }
+        _logger.Information("Rebuilt {Count} placeholders for {Letter}:", rebuilt, drive.Letter);
     }
 
     public async Task StopAcceptingNewChangesAsync()
     {
+        try { _reconcileTimer?.Dispose(); } catch { }
         foreach (var w in _watchers)
         {
             try { w.Stop(); } catch (Exception ex) { _logger.Warning(ex, "Watcher stop failed"); }
         }
         await _delta.DisposeAsync();
+        ReconcileLocalChanges();
     }
 
     public async Task FlushAndStopAsync(TimeSpan timeout)
@@ -351,6 +452,7 @@ internal sealed class SyncEngine : IAsyncDisposable
     {
         try { _cts?.Cancel(); } catch { }
         try { _manifestPushTimer?.Dispose(); } catch { }
+        try { _reconcileTimer?.Dispose(); } catch { }
 
         // Final manifest push so other machines see our up-to-date state
         try { await PushManifestAsync(); } catch { }

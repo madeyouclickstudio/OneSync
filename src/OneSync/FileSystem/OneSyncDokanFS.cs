@@ -6,6 +6,7 @@ using System.Security.AccessControl;
 using System.Threading.Tasks;
 using DokanNet;
 using OneSync.Config;
+using OneSync.Sync;
 using Serilog;
 using FileAccess = DokanNet.FileAccess;
 
@@ -201,7 +202,7 @@ internal sealed class OneSyncDokanFS : IDokanOperations
             try
             {
                 var localInfo = new FileInfo(localPath);
-                if (localInfo.Length == 0)
+                if (localInfo.Length == 0 || (localInfo.Attributes & FileAttributes.SparseFile) != 0)
                 {
                     EnsureHydratedSync(fileName, localPath);
                 }
@@ -260,6 +261,13 @@ internal sealed class OneSyncDokanFS : IDokanOperations
                 streamAccess = System.IO.FileAccess.ReadWrite;
 
             var stream = new FileStream(localPath, mode, streamAccess, share, 4096, options);
+
+            // Overwriting a placeholder makes it a real file, even if it stays empty.
+            if (pathExists && (mode == FileMode.Create || mode == FileMode.Truncate))
+            {
+                try { PlaceholderManager.SetSparse(stream.SafeFileHandle, false); }
+                catch { }
+            }
 
             if (pathExists && (mode == FileMode.OpenOrCreate || mode == FileMode.Create))
                 result = DokanResult.AlreadyExists;
@@ -456,9 +464,8 @@ internal sealed class OneSyncDokanFS : IDokanOperations
 
             long length = fsi is FileInfo fi ? fi.Length : 0L;
 
-            // For placeholders (zero-length local files), report the remote size so Explorer's
-            // size column matches the cloud file.
-            if (fsi is FileInfo file && file.Length == 0 && _hydration != null)
+            // Placeholders report the cloud file's size.
+            if (fsi is FileInfo file && LocalState.IsPlaceholder(file) && _hydration != null)
             {
                 var remoteSize = _hydration.GetRemoteSize(_driveConfig, DokanToPosixRelative(fileName));
                 if (remoteSize > 0) length = remoteSize;
@@ -525,8 +532,8 @@ internal sealed class OneSyncDokanFS : IDokanOperations
 
                 long length = item is FileInfo fi ? fi.Length : 0L;
 
-                // Patch placeholder size from metadata
-                if (item is FileInfo file && file.Length == 0 && _hydration != null)
+                // Placeholders report the cloud file's size.
+                if (item is FileInfo file && LocalState.IsPlaceholder(file) && _hydration != null)
                 {
                     var childRel = (parentRel == "/" ? "/" : parentRel + "/") + item.Name;
                     var remoteSize = _hydration.GetRemoteSize(_driveConfig, childRel);

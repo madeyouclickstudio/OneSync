@@ -3,11 +3,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Linq;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Graph;
-using Microsoft.Graph.Models;
 using Microsoft.Graph.Models.ODataErrors;
 using OneSync.Config;
 using OneSync.FileSystem;
@@ -19,13 +19,14 @@ using Serilog;
 namespace OneSync.Sync;
 
 /// <summary>
-/// Drains the SyncQueue: uploads, deletes, renames against Graph API.
-/// Multiple workers can run concurrently for parallel uploads.
+/// Drains the SyncQueue: uploads, folder creates, deletes and renames against
+/// Graph. Independent operations run in parallel; the queue holds back anything
+/// that has to wait for an earlier change to the same path.
 /// </summary>
 internal sealed class UploadWorker
 {
-    private const int SimpleUploadMaxBytes = 4 * 1024 * 1024; // < 4 MB = simple PUT
-    private const int ResumableChunkBytes = 10 * 1024 * 1024; // 10 MB chunks for resumable
+    private const int SimpleUploadMaxBytes = 4 * 1024 * 1024;
+    private const int ResumableChunkBytes = 10 * 1024 * 1024; // multiple of 320 KiB, as Graph requires
 
     private readonly SyncQueue _queue;
     private readonly MetadataStore _metadata;
@@ -40,7 +41,7 @@ internal sealed class UploadWorker
     public event Action<DriveConfig, string, long>? UploadStarted;
 
     /// <summary>Fires while an upload is in progress (drive, relativePath, bytesUploaded, totalBytes).
-    /// For simple uploads (<4MB) you only get one Progress event followed by Completed.</summary>
+    /// For simple uploads (&lt;4MB) you only get Started followed by Completed.</summary>
     public event Action<DriveConfig, string, long, long>? UploadProgress;
 
     /// <summary>Fires when an upload completes successfully.</summary>
@@ -82,12 +83,17 @@ internal sealed class UploadWorker
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         _logger.Information("UploadWorker started");
-
         var degree = Math.Max(1, _settings.MaxConcurrentUploads);
-        var sem = new SemaphoreSlim(degree, degree);
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            if (_pause?.IsPaused() == true)
+            {
+                try { await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken); }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+
             var batch = _queue.GetPending(max: degree * 4);
             if (batch.Count == 0)
             {
@@ -96,28 +102,8 @@ internal sealed class UploadWorker
                 continue;
             }
 
-            if (_pause?.IsPaused() == true)
-            {
-                _logger.Debug("Upload worker skipped (paused)");
-                try { await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken); }
-                catch (OperationCanceledException) { break; }
-                continue;
-            }
-
-            var tasks = new List<Task>(batch.Count);
-            foreach (var op in batch)
-            {
-                if (cancellationToken.IsCancellationRequested) break;
-                await sem.WaitAsync(cancellationToken);
-                tasks.Add(Task.Run(async () =>
-                {
-                    try { await ProcessAsync(op, cancellationToken); }
-                    finally { sem.Release(); }
-                }, cancellationToken));
-            }
-
-            try { await Task.WhenAll(tasks); }
-            catch (OperationCanceledException) { /* exit */ }
+            try { await RunBatchAsync(batch, degree, cancellationToken); }
+            catch (OperationCanceledException) { break; }
             catch (Exception ex) { _logger.Warning(ex, "Batch processing had exceptions"); }
         }
 
@@ -125,33 +111,41 @@ internal sealed class UploadWorker
     }
 
     /// <summary>
-    /// Forces a drain pass with a hard timeout. Used at graceful shutdown.
+    /// Sends everything still queued, ignoring retry back-off, until the queue is
+    /// empty, nothing more can be sent, or the token fires. Used at shutdown.
     /// </summary>
     public async Task FlushAsync(CancellationToken cancellationToken)
     {
         var degree = Math.Max(1, _settings.MaxConcurrentUploads);
-        var sem = new SemaphoreSlim(degree, degree);
+        var attempted = new HashSet<LiteDB.ObjectId>();
 
-        while (!cancellationToken.IsCancellationRequested && _queue.CountPending() > 0)
+        while (!cancellationToken.IsCancellationRequested)
         {
-            var batch = _queue.GetPending(max: degree * 4);
+            var batch = _queue.GetPending(max: degree * 4, ignoreBackoff: true)
+                .FindAll(o => !attempted.Contains(o.Id));
             if (batch.Count == 0) break;
+            foreach (var op in batch) attempted.Add(op.Id);
 
-            var tasks = new List<Task>(batch.Count);
-            foreach (var op in batch)
-            {
-                if (cancellationToken.IsCancellationRequested) break;
-                await sem.WaitAsync(cancellationToken);
-                tasks.Add(Task.Run(async () =>
-                {
-                    try { await ProcessAsync(op, cancellationToken); }
-                    finally { sem.Release(); }
-                }, cancellationToken));
-            }
-
-            try { await Task.WhenAll(tasks); }
-            catch { /* swallow - we still want to keep flushing */ }
+            try { await RunBatchAsync(batch, degree, cancellationToken); }
+            catch { }
         }
+    }
+
+    private async Task RunBatchAsync(List<SyncOperation> batch, int degree, CancellationToken ct)
+    {
+        using var sem = new SemaphoreSlim(degree, degree);
+        var tasks = new List<Task>(batch.Count);
+        foreach (var op in batch)
+        {
+            if (ct.IsCancellationRequested) break;
+            await sem.WaitAsync(ct);
+            tasks.Add(Task.Run(async () =>
+            {
+                try { await ProcessAsync(op, ct); }
+                finally { sem.Release(); }
+            }, CancellationToken.None));
+        }
+        await Task.WhenAll(tasks);
     }
 
     private async Task ProcessAsync(SyncOperation op, CancellationToken ct)
@@ -173,6 +167,9 @@ internal sealed class UploadWorker
                 case SyncOpType.Upload:
                     await UploadAsync(op, drive, ct);
                     break;
+                case SyncOpType.RemoteCreateFolder:
+                    await EnsureRemoteFolderAsync(drive, op.RelativePath, ct);
+                    break;
                 case SyncOpType.RemoteDelete:
                     try { SyncOpStarted?.Invoke(drive, op.RelativePath, "Deleting"); } catch { }
                     try { await RemoteDeleteAsync(op, drive, ct); }
@@ -189,40 +186,26 @@ internal sealed class UploadWorker
                     return;
             }
 
-            _queue.MarkCompleted(op);
-            MarkOpFile(op, drive, SyncOverlayState.Synced);
+            if (op.Status == SyncOpStatus.InProgress)
+            {
+                _queue.MarkCompleted(op);
+                MarkOpFile(op, drive, SyncOverlayState.Synced);
+            }
             _quotaCache.Invalidate(drive);
         }
         catch (PermissionDeniedException pde)
         {
-            // 403 is permanent - admin needs to grant access. Mark Failed without retrying.
+            // 403 is permanent until someone grants access.
             _logger.Warning("Permission denied: {Detail}", pde.Message);
             _queue.MarkFailed(op, pde.Message);
             MarkOpFile(op, drive, SyncOverlayState.Error);
             try { UploadFailed?.Invoke(drive, op.RelativePath,
                 "You don't have permission to save to this folder. Ask your administrator."); } catch { }
-            return;
         }
         catch (RemoteConflictException conflict)
         {
-            // The cloud version has moved on since we last synced this file. Hand off
-            // to ConflictResolver: it renames the local file to "(conflict from <machine> ...).<ext>"
-            // and queues the renamed copy as a new upload, then re-hydrates the canonical path.
             _logger.Warning("Remote conflict on {Path}: {Detail}", op.RelativePath, conflict.Message);
-            if (_conflictResolver != null)
-            {
-                var resolved = await _conflictResolver.ResolveAsync(drive, op);
-                if (resolved)
-                    _queue.MarkCompleted(op);
-                else
-                    _queue.MarkFailed(op, "conflict resolution failed");
-            }
-            else
-            {
-                _logger.Error("No ConflictResolver wired - marking op failed: {Op}", op);
-                _queue.MarkFailed(op, conflict.Message);
-                MarkOpFile(op, drive, SyncOverlayState.Error);
-            }
+            await HandleConflictAsync(op, drive, ct);
         }
         catch (OperationCanceledException)
         {
@@ -234,17 +217,6 @@ internal sealed class UploadWorker
             var retryAfter = TimeSpan.FromSeconds(_settings.RetryBackoffBaseSeconds);
             _logger.Warning("Throttled (429) for {Op} - retrying in {Delay}", op, retryAfter);
             _queue.MarkRetry(op, retryAfter, "throttled (429)");
-        }
-        catch (ODataError ex) when (ex.ResponseStatusCode == 401 || ex.ResponseStatusCode == 403)
-        {
-            var status = ex.ResponseStatusCode;
-            _logger.Warning("Auth/permission error {Status} for {Op}: {Msg}",
-                status, op, ex.Error?.Message);
-
-            if (op.RetryCount >= _settings.MaxRetries)
-                _queue.MarkFailed(op, $"persistent {status}: {ex.Error?.Message}");
-            else
-                _queue.MarkRetry(op, ComputeBackoff(op.RetryCount), $"auth {status}");
         }
         catch (Exception ex)
         {
@@ -265,16 +237,30 @@ internal sealed class UploadWorker
         }
     }
 
+    private async Task HandleConflictAsync(SyncOperation op, DriveConfig drive, CancellationToken ct)
+    {
+        if (_conflictResolver is null)
+        {
+            _queue.MarkFailed(op, "conflict");
+            MarkOpFile(op, drive, SyncOverlayState.Error);
+            return;
+        }
+
+        RemoteItem? remote = null;
+        try { remote = await GetRemoteItemAsync(drive, op.RelativePath, ct); }
+        catch (Exception ex) { _logger.Debug(ex, "Could not fetch cloud copy of {Path}", op.RelativePath); }
+
+        if (await _conflictResolver.ResolveAsync(drive, op, remote))
+            _queue.MarkCompleted(op);
+        else
+            _queue.MarkRetry(op, ComputeBackoff(op.RetryCount), "conflict copy could not be made (file in use?)");
+    }
+
     private static void MarkOpFile(SyncOperation op, DriveConfig drive, SyncOverlayState state)
     {
-        if (op.Type != SyncOpType.Upload) return; // delete/rename ops have no local file to mark
-        try
-        {
-            var winRel = PathUtil.ToWindowsRelative(op.RelativePath);
-            var localPath = Path.Combine(drive.LocalRootPath, winRel);
-            SyncStateMarker.Mark(localPath, state);
-        }
-        catch { /* best effort */ }
+        if (op.Type != SyncOpType.Upload) return;
+        try { SyncStateMarker.Mark(PlaceholderManager.LocalPathFor(drive, op.RelativePath), state); }
+        catch { }
     }
 
     private TimeSpan ComputeBackoff(int retryCount)
@@ -283,248 +269,409 @@ internal sealed class UploadWorker
         return TimeSpan.FromSeconds(Math.Min(seconds, 3600));
     }
 
+    // --- uploads ---
+
     private async Task UploadAsync(SyncOperation op, DriveConfig drive, CancellationToken ct)
     {
-        var winRel = PathUtil.ToWindowsRelative(op.RelativePath);
-        var localPath = Path.Combine(drive.LocalRootPath, winRel);
+        var localPath = PlaceholderManager.LocalPathFor(drive, op.RelativePath);
+        var fi = new FileInfo(localPath);
 
-        if (!File.Exists(localPath))
+        if (!fi.Exists)
         {
-            _logger.Information("Local file missing for upload, skipping: {Path}", localPath);
+            _logger.Information("Local file gone before upload, skipping: {Path}", op.RelativePath);
+            return;
+        }
+        if (LocalState.IsPlaceholder(fi))
+        {
+            _logger.Debug("Not uploading placeholder: {Path}", op.RelativePath);
             return;
         }
 
-        var fi = new FileInfo(localPath);
         var meta = _metadata.Get(op.DriveConfigId, op.RelativePath);
-
-        // Last-line-of-defence: never upload a placeholder (zero bytes when metadata
-        // says there's remote content). This protects against:
-        //   - queue entries that outlived a cleanup cycle
-        //   - LRU eviction races where a watcher event slipped past the suppressor
-        //   - any future code path that accidentally produces a 0-byte upload
-        // for a non-empty file.
-        // If this branch is ever hit, the cloud copy is preserved (we don't upload).
-        if (fi.Length == 0)
+        if (LocalState.IsInterruptedDownload(fi, meta))
         {
-            if (meta != null && !meta.IsFolder && meta.Size > 0)
+            _logger.Debug("Not uploading a download in progress: {Path}", op.RelativePath);
+            return;
+        }
+        if (meta is { IsFolder: true })
+        {
+            _logger.Warning("{Path} is a folder in the cloud but a file here; uploading as a conflict copy", op.RelativePath);
+            throw new RemoteConflictException(op.RelativePath, meta.ETag);
+        }
+
+        // An empty, non-sparse file against a non-empty cloud file with no record of
+        // being downloaded: a placeholder from an older version, not a user edit.
+        if (fi.Length == 0 && meta != null && meta.Size > 0 && !meta.Hydrated && !LocalState.HasBaseline(meta))
+        {
+            _logger.Warning("Refusing to upload empty file over {Size}-byte cloud copy: {Path}", meta.Size, op.RelativePath);
+            return;
+        }
+
+        if (fi.Length > _settings.MaxFileSizeMB * 1024L * 1024L)
+        {
+            _queue.MarkFailed(op, $"larger than the {_settings.MaxFileSizeMB} MB limit");
+            return;
+        }
+
+        if (meta != null && meta.RemoteChangedSinceBaseline)
+        {
+            // We hold a local copy and the cloud copy may be different: either both
+            // changed, or we have no record of where the local copy came from.
+            await ReconcileWithCloudAsync(op, drive, fi, meta, ct);
+            return;
+        }
+
+        if (meta != null && !LocalState.HasBaseline(meta) && meta.Hydrated && fi.Length == meta.Size
+            && !string.IsNullOrEmpty(meta.ContentHash))
+        {
+            // Record from before baselines were kept: a hash tells us whether this
+            // is really an edit.
+            if (string.Equals(QuickXorHash.ComputeBase64(localPath), meta.ContentHash, StringComparison.Ordinal))
             {
-                _logger.Warning(
-                    "Refusing to upload 0-byte local against {RemoteSize}-byte remote " +
-                    "(probably an evicted placeholder or stale queue entry): {Path}",
-                    meta.Size, op.RelativePath);
+                _metadata.MarkHydrated(op.DriveConfigId, op.RelativePath, null, fi);
                 return;
             }
         }
-
-        // If the local file looks identical to the known remote version, skip.
-        if (fi.Length > 0)
+        else if (meta != null && !LocalState.IsDirty(fi, meta))
         {
-            if (meta != null && !meta.IsFolder && meta.Hydrated && fi.Length == meta.Size)
-            {
-                _logger.Debug("Skipping upload of unmodified hydrated file: {Path}", op.RelativePath);
-                return;
-            }
+            _logger.Debug("Unchanged since last sync: {Path}", op.RelativePath);
+            return;
         }
 
-        op.FileSizeBytes = fi.Length;
-
-        // Look up the eTag we recorded last time we synced this file. If we have
-        // one, the upload sends If-Match: <etag> so the server rejects with 412
-        // if the cloud version has been updated by another machine since we last
-        // saw it. That 412 triggers ConflictResolver instead of clobbering.
-        var ifMatchETag = meta?.ETag;
-
-        try { UploadStarted?.Invoke(drive, op.RelativePath, fi.Length); } catch { }
-
-        if (fi.Length < SimpleUploadMaxBytes)
-            await SimpleUploadAsync(op, drive, localPath, ifMatchETag, ct);
-        else
-            await ResumableUploadAsync(op, drive, localPath, fi.Length, ifMatchETag, ct);
-
-        try { UploadCompleted?.Invoke(drive, op.RelativePath, fi.Length); } catch { }
+        await SendFileAsync(op, drive, localPath, fi, string.IsNullOrEmpty(meta?.ETag) ? null : meta!.ETag, ct);
     }
 
-    private async Task SimpleUploadAsync(SyncOperation op, DriveConfig drive, string localPath, string? ifMatchETag, CancellationToken ct)
+    /// <summary>
+    /// Uploads the file. With an eTag the cloud rejects the upload if its copy has
+    /// changed since; without one it is a new file and must not replace anything
+    /// already in the cloud under that name.
+    /// </summary>
+    private async Task SendFileAsync(SyncOperation op, DriveConfig drive, string localPath, FileInfo fi,
+        string? ifMatchETag, CancellationToken ct)
+    {
+        fi.Refresh();
+        long length = fi.Length;
+        long writeTicks = fi.LastWriteTimeUtc.Ticks;
+        op.FileSizeBytes = length;
+
+        try { UploadStarted?.Invoke(drive, op.RelativePath, length); } catch { }
+
+        UploadResult? result;
+        string localHash;
+        try
+        {
+            if (length < SimpleUploadMaxBytes)
+                (result, localHash) = await SimpleUploadAsync(op, drive, localPath, ifMatchETag, ct);
+            else
+                (result, localHash) = await ResumableUploadAsync(op, drive, localPath, length, ifMatchETag, ct);
+        }
+        catch (NameTakenException)
+        {
+            var meta = _metadata.Get(op.DriveConfigId, op.RelativePath);
+            await ReconcileWithCloudAsync(op, drive, fi, meta, ct);
+            return;
+        }
+
+        if (result is null) return;
+
+        _metadata.RecordUpload(op.DriveConfigId, op.RelativePath, result, length, writeTicks);
+        op.RemoteItemId = result.RemoteItemId;
+
+        if (!string.IsNullOrEmpty(result.QuickXorHash) && result.Size == length &&
+            !string.Equals(result.QuickXorHash, localHash, StringComparison.Ordinal))
+        {
+            _logger.Warning("Upload check: cloud hash of {Path} differs from what was sent; will re-check on next sync",
+                op.RelativePath);
+        }
+
+        _logger.Information("Upload complete: {Drive}:{Path} -> remote {Id} ({Size} bytes)",
+            drive.Letter, op.RelativePath, result.RemoteItemId, length);
+        try { UploadCompleted?.Invoke(drive, op.RelativePath, length); } catch { }
+    }
+
+    /// <summary>
+    /// Settles a local file whose relationship to the cloud copy is unknown. If the
+    /// two are identical we just record that; otherwise the local copy goes up as a
+    /// conflict copy and the cloud copy keeps the name. Nothing is overwritten.
+    /// </summary>
+    private async Task ReconcileWithCloudAsync(SyncOperation op, DriveConfig drive, FileInfo fi,
+        RemoteItem? meta, CancellationToken ct)
+    {
+        var remote = await GetRemoteItemAsync(drive, op.RelativePath, ct);
+        if (remote is null)
+        {
+            // Not in the cloud after all: an ordinary new file.
+            if (meta != null) _metadata.Delete(op.DriveConfigId, op.RelativePath);
+            await SendFileAsync(op, drive, fi.FullName, fi, null, ct);
+            return;
+        }
+
+        if (!remote.IsFolder && remote.Size == fi.Length && !string.IsNullOrEmpty(remote.ContentHash) &&
+            string.Equals(QuickXorHash.ComputeBase64(fi.FullName), remote.ContentHash, StringComparison.Ordinal))
+        {
+            remote.Hydrated = true;
+            remote.PlaceholderCreated = true;
+            LocalState.SetBaseline(remote, fi);
+            _metadata.Upsert(remote);
+            _logger.Information("{Path} already matches the cloud copy", op.RelativePath);
+            return;
+        }
+
+        if (_conflictResolver is null)
+            throw new InvalidOperationException("conflict with cloud copy and no resolver");
+
+        if (!await _conflictResolver.ResolveAsync(drive, op, remote))
+            throw new IOException("conflict copy could not be made (file in use?)");
+    }
+
+    private async Task<(UploadResult? Result, string LocalHash)> SimpleUploadAsync(
+        SyncOperation op, DriveConfig drive, string localPath, string? ifMatchETag, CancellationToken ct)
     {
         var url = BuildContentUrl(drive, op.RelativePath);
+        if (ifMatchETag is null) url += "?@microsoft.graph.conflictBehavior=fail";
 
-        // Read whole file into memory up-front so retries can rebuild the
-        // request with fresh ByteArrayContent (HttpContent and HttpRequestMessage
-        // are both single-use). SimpleUploadMaxBytes caps this at ~4MB.
-        var bytes = await File.ReadAllBytesAsync(localPath, ct);
-        var capturedIfMatch = ifMatchETag;
+        byte[] bytes;
+        await using (var fs = new FileStream(localPath, FileMode.Open, System.IO.FileAccess.Read,
+                         FileShare.ReadWrite | FileShare.Delete, 4096, useAsync: true))
+        {
+            bytes = new byte[fs.Length];
+            int read = 0;
+            while (read < bytes.Length)
+            {
+                int n = await fs.ReadAsync(bytes.AsMemory(read), ct);
+                if (n == 0) break;
+                read += n;
+            }
+            if (read != bytes.Length) Array.Resize(ref bytes, read);
+        }
+
+        var hasher = new QuickXorHash();
+        hasher.Append(bytes);
+        var localHash = Convert.ToBase64String(hasher.Finish());
 
         using var resp = await _graph.SendAsync(() =>
         {
             var content = new ByteArrayContent(bytes);
             content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
             var r = new HttpRequestMessage(HttpMethod.Put, url) { Content = content };
-            if (!string.IsNullOrEmpty(capturedIfMatch))
-                r.Headers.TryAddWithoutValidation("If-Match", capturedIfMatch);
+            if (!string.IsNullOrEmpty(ifMatchETag))
+                r.Headers.TryAddWithoutValidation("If-Match", ifMatchETag);
             return r;
         }, ct, HttpCompletionOption.ResponseHeadersRead);
+
+        await ThrowForUploadFailureAsync(resp, op, ifMatchETag, "Simple upload", ct);
+
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+        return (UploadResult.FromJson(doc.RootElement), localHash);
+    }
+
+    private async Task<(UploadResult? Result, string LocalHash)> ResumableUploadAsync(
+        SyncOperation op, DriveConfig drive, string localPath, long fileSize, string? ifMatchETag, CancellationToken ct)
+    {
+        var sessionUrl = BuildCreateUploadSessionUrl(drive, op.RelativePath);
+        var behaviour = ifMatchETag is null ? "fail" : "replace";
+
+        using var sessionResp = await _graph.SendAsync(() =>
+        {
+            var r = new HttpRequestMessage(HttpMethod.Post, sessionUrl);
+            if (!string.IsNullOrEmpty(ifMatchETag))
+                r.Headers.TryAddWithoutValidation("If-Match", ifMatchETag);
+            r.Content = new StringContent(
+                "{\"item\":{\"@microsoft.graph.conflictBehavior\":\"" + behaviour + "\"}}",
+                System.Text.Encoding.UTF8, "application/json");
+            return r;
+        }, ct);
+        await ThrowForUploadFailureAsync(sessionResp, op, ifMatchETag, "createUploadSession", ct);
+
+        var sessionJson = await sessionResp.Content.ReadAsStringAsync(ct);
+        string uploadUrl;
+        using (var sessionDoc = JsonDocument.Parse(sessionJson))
+            uploadUrl = sessionDoc.RootElement.GetProperty("uploadUrl").GetString()
+                ?? throw new InvalidOperationException("uploadUrl missing in session response");
+
+        _logger.Information("Resumable upload session created for {Path} ({Size} bytes)", op.RelativePath, fileSize);
+
+        var hasher = new QuickXorHash();
+        await using var fs = new FileStream(localPath, FileMode.Open, System.IO.FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, 4096, useAsync: true);
+        var buffer = new byte[ResumableChunkBytes];
+        long offset = 0;
+
+        try
+        {
+            while (offset < fileSize)
+            {
+                ct.ThrowIfCancellationRequested();
+                var toRead = (int)Math.Min(ResumableChunkBytes, fileSize - offset);
+                int got = 0;
+                while (got < toRead)
+                {
+                    int n = await fs.ReadAsync(buffer.AsMemory(got, toRead - got), ct);
+                    if (n == 0) break;
+                    got += n;
+                }
+                if (got != toRead)
+                    throw new IOException($"{op.RelativePath} changed size while uploading");
+
+                var chunkBytes = buffer.AsSpan(0, got).ToArray();
+                hasher.Append(chunkBytes);
+                var chunkOffset = offset;
+
+                using var chunkResp = await _graph.SendPreSignedAsync(() =>
+                {
+                    var content = new ByteArrayContent(chunkBytes);
+                    content.Headers.ContentLength = chunkBytes.Length;
+                    content.Headers.ContentRange = new ContentRangeHeaderValue(
+                        chunkOffset, chunkOffset + chunkBytes.Length - 1, fileSize);
+                    return new HttpRequestMessage(HttpMethod.Put, uploadUrl) { Content = content };
+                }, ct);
+
+                offset += got;
+
+                if (chunkResp.StatusCode == HttpStatusCode.Created || chunkResp.StatusCode == HttpStatusCode.OK)
+                {
+                    var doneJson = await chunkResp.Content.ReadAsStringAsync(ct);
+                    using var doneDoc = JsonDocument.Parse(doneJson);
+                    return (UploadResult.FromJson(doneDoc.RootElement), Convert.ToBase64String(hasher.Finish()));
+                }
+                if (chunkResp.StatusCode == HttpStatusCode.Accepted)
+                {
+                    try { UploadProgress?.Invoke(drive, op.RelativePath, offset, fileSize); } catch { }
+                    continue;
+                }
+                if (chunkResp.StatusCode == HttpStatusCode.Conflict && ifMatchETag is null)
+                    throw new NameTakenException();
+
+                var body = await chunkResp.Content.ReadAsStringAsync(ct);
+                throw new HttpRequestException(
+                    $"chunk upload at offset {chunkOffset} failed: {(int)chunkResp.StatusCode} - {Truncate(body, 500)}",
+                    inner: null, statusCode: chunkResp.StatusCode);
+            }
+        }
+        catch
+        {
+            _ = CancelUploadSessionAsync(uploadUrl);
+            throw;
+        }
+
+        throw new IOException("upload session ended without the server confirming the file");
+    }
+
+    private async Task CancelUploadSessionAsync(string uploadUrl)
+    {
+        try
+        {
+            using var _ = await _graph.SendPreSignedAsync(
+                () => new HttpRequestMessage(HttpMethod.Delete, uploadUrl), CancellationToken.None);
+        }
+        catch { }
+    }
+
+    private static async Task ThrowForUploadFailureAsync(HttpResponseMessage resp, SyncOperation op,
+        string? ifMatchETag, string what, CancellationToken ct)
+    {
+        if (resp.IsSuccessStatusCode) return;
 
         if (resp.StatusCode == HttpStatusCode.PreconditionFailed)
             throw new RemoteConflictException(op.RelativePath, ifMatchETag);
 
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        if (resp.StatusCode == HttpStatusCode.Conflict && ifMatchETag is null)
+            throw new NameTakenException();
         if (resp.StatusCode == HttpStatusCode.Forbidden)
-        {
-            var body = await resp.Content.ReadAsStringAsync(ct);
             throw new PermissionDeniedException("upload", op.RelativePath, ExtractServerMessage(body));
+
+        throw new HttpRequestException(
+            $"{what} failed: {(int)resp.StatusCode} {resp.ReasonPhrase} - {Truncate(body, 500)}",
+            inner: null, statusCode: resp.StatusCode);
+    }
+
+    private sealed class NameTakenException : Exception { }
+
+    // --- folders, deletes, renames ---
+
+    /// <summary>Creates a folder (and any missing parents) in the cloud.</summary>
+    private async Task EnsureRemoteFolderAsync(DriveConfig drive, string relativePath, CancellationToken ct)
+    {
+        relativePath = PathUtil.NormalizeRelative(relativePath);
+        if (relativePath == "/") return;
+
+        var existing = await GetRemoteItemAsync(drive, relativePath, ct);
+        if (existing != null)
+        {
+            if (!existing.IsFolder)
+                throw new IOException($"{relativePath} is a file in the cloud");
+            _metadata.RecordFolder(drive.ConfigId, relativePath, new UploadResult
+            {
+                ETag = existing.ETag, RemoteItemId = existing.RemoteItemId,
+                ParentRemoteItemId = existing.ParentRemoteItemId, WebUrl = existing.WebUrl,
+            });
+            return;
         }
 
+        var parent = PathUtil.ParentOf(relativePath);
+        if (parent != "/" && await GetRemoteItemAsync(drive, parent, ct) is null)
+            await EnsureRemoteFolderAsync(drive, parent, ct);
+
+        var name = relativePath[(relativePath.LastIndexOf('/') + 1)..];
+        var url = BuildChildrenUrl(drive, parent);
+        var payload = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["name"] = name,
+            ["folder"] = new Dictionary<string, object>(),
+            ["@microsoft.graph.conflictBehavior"] = "fail",
+        });
+
+        using var resp = await _graph.SendAsync(() => new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json"),
+        }, ct);
+
+        if (resp.StatusCode == HttpStatusCode.Conflict)
+        {
+            // Created by someone else in the meantime.
+            await EnsureRemoteFolderAsync(drive, relativePath, ct);
+            return;
+        }
+        if (resp.StatusCode == HttpStatusCode.Forbidden)
+        {
+            var body403 = await resp.Content.ReadAsStringAsync(ct);
+            throw new PermissionDeniedException("create folder", relativePath, ExtractServerMessage(body403));
+        }
         if (!resp.IsSuccessStatusCode)
         {
             var body = await resp.Content.ReadAsStringAsync(ct);
             throw new HttpRequestException(
-                $"Simple upload failed: {(int)resp.StatusCode} {resp.ReasonPhrase} - {Truncate(body, 500)}",
+                $"create folder failed: {(int)resp.StatusCode} - {Truncate(body, 500)}",
                 inner: null, statusCode: resp.StatusCode);
         }
 
         var json = await resp.Content.ReadAsStringAsync(ct);
-        var item = System.Text.Json.JsonDocument.Parse(json).RootElement;
-        string? newId = null;
-        string? newETag = null;
-        if (item.TryGetProperty("id", out var idProp)) newId = idProp.GetString();
-        if (item.TryGetProperty("eTag", out var etagProp)) newETag = etagProp.GetString();
-        op.RemoteItemId = newId;
-        if (newETag != null)
-            _metadata.UpdateETag(op.DriveConfigId, op.RelativePath, newETag, newId, op.FileSizeBytes);
-
-        _logger.Information("Upload complete: {Drive}:{Path} -> remote {Id} ({Size} bytes)",
-            drive.Letter, op.RelativePath, op.RemoteItemId, op.FileSizeBytes);
-    }
-
-    private async Task ResumableUploadAsync(SyncOperation op, DriveConfig drive, string localPath,
-        long fileSize, string? ifMatchETag, CancellationToken ct)
-    {
-        var sessionUrl = BuildCreateUploadSessionUrl(drive, op.RelativePath);
-
-        // 1) Create upload session (authenticated). If we have an etag, ask the
-        // server to fail the session creation when the cloud version differs.
-        var capturedSessionIfMatch = ifMatchETag;
-        using var sessionResp = await _graph.SendAsync(() =>
-        {
-            var r = new HttpRequestMessage(HttpMethod.Post, sessionUrl);
-            if (!string.IsNullOrEmpty(capturedSessionIfMatch))
-                r.Headers.TryAddWithoutValidation("If-Match", capturedSessionIfMatch);
-            r.Content = new StringContent(
-                "{\"item\":{\"@microsoft.graph.conflictBehavior\":\"replace\"}}",
-                System.Text.Encoding.UTF8, "application/json");
-            return r;
-        }, ct);
-        if (sessionResp.StatusCode == HttpStatusCode.PreconditionFailed)
-            throw new RemoteConflictException(op.RelativePath, ifMatchETag);
-        if (sessionResp.StatusCode == HttpStatusCode.Forbidden)
-        {
-            var body = await sessionResp.Content.ReadAsStringAsync(ct);
-            throw new PermissionDeniedException("upload", op.RelativePath, ExtractServerMessage(body));
-        }
-        if (!sessionResp.IsSuccessStatusCode)
-        {
-            var body = await sessionResp.Content.ReadAsStringAsync(ct);
-            throw new HttpRequestException(
-                $"createUploadSession failed: {(int)sessionResp.StatusCode} {sessionResp.ReasonPhrase} - {Truncate(body, 500)}",
-                inner: null, statusCode: sessionResp.StatusCode);
-        }
-
-        var sessionJson = await sessionResp.Content.ReadAsStringAsync(ct);
-        var uploadUrl = System.Text.Json.JsonDocument.Parse(sessionJson)
-            .RootElement.GetProperty("uploadUrl").GetString()
-            ?? throw new InvalidOperationException("uploadUrl missing in session response");
-
-        _logger.Information("Resumable upload session created for {Path} ({Size} bytes)",
-            op.RelativePath, fileSize);
-
-        // 2) Upload chunks via the pre-signed session URL (no Authorization needed)
-        using var fs = new FileStream(localPath, FileMode.Open, System.IO.FileAccess.Read, FileShare.ReadWrite);
-        var buffer = new byte[ResumableChunkBytes];
-        long offset = 0;
-
-        while (offset < fileSize)
-        {
-            ct.ThrowIfCancellationRequested();
-            var toRead = (int)Math.Min(ResumableChunkBytes, fileSize - offset);
-            var actuallyRead = await fs.ReadAsync(buffer.AsMemory(0, toRead), ct);
-            if (actuallyRead <= 0) break;
-
-            // Snapshot the chunk into its own buffer so retries can rebuild
-            // ByteArrayContent without re-reading the file stream.
-            var chunkBytes = new byte[actuallyRead];
-            Buffer.BlockCopy(buffer, 0, chunkBytes, 0, actuallyRead);
-            var chunkOffset = offset;
-            var chunkLen = actuallyRead;
-
-            HttpResponseMessage chunkResp;
-            try
-            {
-                chunkResp = await _graph.SendPreSignedAsync(() =>
-                {
-                    var content = new ByteArrayContent(chunkBytes);
-                    content.Headers.ContentLength = chunkLen;
-                    content.Headers.ContentRange = new ContentRangeHeaderValue(chunkOffset, chunkOffset + chunkLen - 1, fileSize);
-                    return new HttpRequestMessage(HttpMethod.Put, uploadUrl) { Content = content };
-                }, ct);
-            }
-            catch (Exception ex)
-            {
-                throw new HttpRequestException(
-                    $"chunk upload at offset {offset} failed: {ex.Message}", ex);
-            }
-
-            // Take ownership of the chunk response: dispose unconditionally
-            // when we leave this iteration of the loop, including via throw.
-            // Without this, every chunk leaks an HttpResponseMessage and the
-            // connection pool can exhaust under sustained upload load.
-            try
-            {
-                if (chunkResp.StatusCode == HttpStatusCode.Created ||
-                    chunkResp.StatusCode == HttpStatusCode.OK)
-                {
-                    var doneJson = await chunkResp.Content.ReadAsStringAsync(ct);
-                    var doneItem = System.Text.Json.JsonDocument.Parse(doneJson).RootElement;
-                    string? newId = null, newETag = null;
-                    if (doneItem.TryGetProperty("id", out var idProp)) newId = idProp.GetString();
-                    if (doneItem.TryGetProperty("eTag", out var etagProp)) newETag = etagProp.GetString();
-                    op.RemoteItemId = newId;
-                    if (newETag != null)
-                        _metadata.UpdateETag(op.DriveConfigId, op.RelativePath, newETag, newId, op.FileSizeBytes);
-                    offset += actuallyRead;
-                    _logger.Information("Resumable upload complete: {Drive}:{Path} -> remote {Id}",
-                        drive.Letter, op.RelativePath, op.RemoteItemId);
-                    break;
-                }
-                else if (chunkResp.StatusCode == HttpStatusCode.Accepted)
-                {
-                    offset += actuallyRead;
-                    _logger.Debug("Chunk uploaded: {Offset}/{Total}", offset, fileSize);
-                    try { UploadProgress?.Invoke(drive, op.RelativePath, offset, fileSize); } catch { }
-                }
-                else
-                {
-                    var body = await chunkResp.Content.ReadAsStringAsync(ct);
-                    throw new HttpRequestException(
-                        $"chunk upload at offset {offset} failed: {(int)chunkResp.StatusCode} - {Truncate(body, 500)}",
-                        inner: null, statusCode: chunkResp.StatusCode);
-                }
-            }
-            finally
-            {
-                chunkResp.Dispose();
-            }
-        }
+        using var doc = JsonDocument.Parse(json);
+        _metadata.RecordFolder(drive.ConfigId, relativePath, UploadResult.FromJson(doc.RootElement));
+        _logger.Information("Created folder in cloud: {Drive}:{Path}", drive.Letter, relativePath);
     }
 
     private async Task RemoteDeleteAsync(SyncOperation op, DriveConfig drive, CancellationToken ct)
     {
-        var url = BuildItemUrl(drive, op.RelativePath);
-        using var resp = await _graph.SendAsync(
-            () => new HttpRequestMessage(HttpMethod.Delete, url), ct);
+        // By id where we have it, so a different file that has since appeared at
+        // the same path is never the one deleted.
+        var url = !string.IsNullOrEmpty(op.RemoteItemId)
+            ? BuildItemByIdUrl(drive, op.RemoteItemId)
+            : BuildItemUrl(drive, op.RelativePath);
+
+        using var resp = await _graph.SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, url), ct);
 
         if (resp.IsSuccessStatusCode || resp.StatusCode == HttpStatusCode.NotFound)
         {
             _logger.Information("Remote delete OK: {Drive}:{Path}", drive.Letter, op.RelativePath);
             return;
+        }
+        if (resp.StatusCode == HttpStatusCode.Forbidden)
+        {
+            var body403 = await resp.Content.ReadAsStringAsync(ct);
+            throw new PermissionDeniedException("delete", op.RelativePath, ExtractServerMessage(body403));
         }
 
         var body = await resp.Content.ReadAsStringAsync(ct);
@@ -543,67 +690,59 @@ internal sealed class UploadWorker
 
         var remoteId = op.RemoteItemId;
         if (string.IsNullOrEmpty(remoteId))
-        {
-            var meta = _metadata.Get(drive.ConfigId, op.RelativePath);
-            remoteId = meta?.RemoteItemId;
-        }
+            remoteId = _metadata.Get(drive.ConfigId, op.NewRelativePath)?.RemoteItemId
+                       ?? _metadata.Get(drive.ConfigId, op.RelativePath)?.RemoteItemId;
 
+        var newLocal = PlaceholderManager.LocalPathFor(drive, op.NewRelativePath);
         if (string.IsNullOrEmpty(remoteId))
         {
-            _logger.Information(
-                "No remote item for rename source {Path} — converting to upload at new path {New}",
-                op.RelativePath, op.NewRelativePath);
-            var localPath = Path.Combine(drive.LocalRootPath,
-                op.NewRelativePath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
-            if (File.Exists(localPath))
-            {
-                _queue.Enqueue(new SyncOperation
-                {
-                    Type = SyncOpType.Upload,
-                    DriveConfigId = op.DriveConfigId,
-                    DriveLetter = op.DriveLetter,
-                    RelativePath = op.NewRelativePath,
-                    Priority = op.Priority,
-                    FileSizeBytes = new FileInfo(localPath).Length,
-                });
-            }
+            // Never reached the cloud under its old name: send it under the new one.
+            if (Directory.Exists(newLocal))
+                QueueLocalTree(drive, op.NewRelativePath, newLocal, op.Priority);
+            else if (File.Exists(newLocal))
+                QueueUpload(drive, op.NewRelativePath, new FileInfo(newLocal).Length, op.Priority);
             return;
         }
 
-        string url;
-        if (drive.IsOneDrive)
-            url = $"https://graph.microsoft.com/v1.0/me/drive/items/{remoteId}";
-        else
-            url = $"https://graph.microsoft.com/v1.0/drives/{drive.ResolvedDriveId}/items/{remoteId}";
+        var newName = op.NewRelativePath[(op.NewRelativePath.LastIndexOf('/') + 1)..];
+        var newParent = PathUtil.ParentOf(op.NewRelativePath);
+        var oldParent = PathUtil.ParentOf(op.RelativePath);
 
-        var newName = Path.GetFileName(op.NewRelativePath.Replace('/', Path.DirectorySeparatorChar));
-        var newParentPath = PathUtil.NormalizeRelative(
-            Path.GetDirectoryName(op.NewRelativePath.Replace('/', Path.DirectorySeparatorChar))?
-                .Replace(Path.DirectorySeparatorChar, '/') ?? "/");
-
-        var body = "{\"name\":\"" + System.Web.HttpUtility.JavaScriptStringEncode(newName) + "\"";
-        if (newParentPath != PathUtil.NormalizeRelative(
-            Path.GetDirectoryName(op.RelativePath.Replace('/', Path.DirectorySeparatorChar))?
-                .Replace(Path.DirectorySeparatorChar, '/') ?? "/"))
+        var patch = new Dictionary<string, object> { ["name"] = newName };
+        if (!newParent.Equals(oldParent, StringComparison.OrdinalIgnoreCase))
         {
-            var parentItemUrl = BuildItemUrl(drive, newParentPath);
-            using var parentResp = await _graph.SendAsync(
-                () => new HttpRequestMessage(HttpMethod.Get, parentItemUrl), ct);
-            if (parentResp.IsSuccessStatusCode)
+            var parentItem = await GetRemoteItemAsync(drive, newParent, ct);
+            if (parentItem is null)
             {
-                var parentJson = await parentResp.Content.ReadAsStringAsync(ct);
-                var parentId = System.Text.Json.JsonDocument.Parse(parentJson).RootElement.GetProperty("id").GetString();
-                body += ",\"parentReference\":{\"id\":\"" + parentId + "\"}";
+                await EnsureRemoteFolderAsync(drive, newParent, ct);
+                parentItem = await GetRemoteItemAsync(drive, newParent, ct)
+                    ?? throw new IOException($"destination folder {newParent} not found in the cloud");
             }
+            patch["parentReference"] = new Dictionary<string, object> { ["id"] = parentItem.RemoteItemId };
         }
-        body += "}";
 
-        var capturedBody = body;
+        var body = JsonSerializer.Serialize(patch);
+        var url = BuildItemByIdUrl(drive, remoteId);
         using var resp = await _graph.SendAsync(() =>
-            new HttpRequestMessage(new HttpMethod("PATCH"), url)
+            new HttpRequestMessage(HttpMethod.Patch, url)
             {
-                Content = new StringContent(capturedBody, System.Text.Encoding.UTF8, "application/json"),
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
             }, ct);
+
+        if (resp.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Gone from the cloud: whatever is here now goes up under the new name.
+            _logger.Information("Rename source {Path} no longer in the cloud; uploading as new", op.RelativePath);
+            _metadata.DeleteTree(drive.ConfigId, op.NewRelativePath);
+            if (Directory.Exists(newLocal)) QueueLocalTree(drive, op.NewRelativePath, newLocal, op.Priority);
+            else if (File.Exists(newLocal)) QueueUpload(drive, op.NewRelativePath, new FileInfo(newLocal).Length, op.Priority);
+            return;
+        }
+        if (resp.StatusCode == HttpStatusCode.Forbidden)
+        {
+            var body403 = await resp.Content.ReadAsStringAsync(ct);
+            throw new PermissionDeniedException("rename", op.RelativePath, ExtractServerMessage(body403));
+        }
         if (!resp.IsSuccessStatusCode)
         {
             var respBody = await resp.Content.ReadAsStringAsync(ct);
@@ -611,66 +750,101 @@ internal sealed class UploadWorker
                 $"remote rename failed: {(int)resp.StatusCode} - {Truncate(respBody, 500)}",
                 inner: null, statusCode: resp.StatusCode);
         }
-        _logger.Information("Remote rename OK: {Drive}:{Old} -> {New}",
-            drive.Letter, op.RelativePath, op.NewRelativePath);
+
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        using (var doc = JsonDocument.Parse(json))
+            _metadata.UpdateRemoteFields(drive.ConfigId, op.NewRelativePath, UploadResult.FromJson(doc.RootElement));
+
+        _logger.Information("Remote rename OK: {Drive}:{Old} -> {New}", drive.Letter, op.RelativePath, op.NewRelativePath);
+
+        // A save made under the new name before the rename reached the cloud.
+        if (File.Exists(newLocal))
+        {
+            var meta = _metadata.Get(drive.ConfigId, op.NewRelativePath);
+            if (LocalState.IsDirty(new FileInfo(newLocal), meta))
+                QueueUpload(drive, op.NewRelativePath, new FileInfo(newLocal).Length, op.Priority);
+        }
+    }
+
+    private void QueueUpload(DriveConfig drive, string relativePath, long size, int priority) =>
+        _queue.Enqueue(new SyncOperation
+        {
+            Type = SyncOpType.Upload,
+            DriveConfigId = drive.ConfigId,
+            DriveLetter = drive.Letter,
+            RelativePath = relativePath,
+            Priority = priority,
+            FileSizeBytes = size,
+        });
+
+    private void QueueLocalTree(DriveConfig drive, string relativePath, string localDir, int priority)
+    {
+        _queue.Enqueue(new SyncOperation
+        {
+            Type = SyncOpType.RemoteCreateFolder,
+            DriveConfigId = drive.ConfigId,
+            DriveLetter = drive.Letter,
+            RelativePath = relativePath,
+            Priority = priority,
+        });
+        foreach (var entry in new DirectoryInfo(localDir).EnumerateFileSystemInfos())
+        {
+            var childRel = relativePath.TrimEnd('/') + "/" + entry.Name;
+            if (entry is DirectoryInfo d) QueueLocalTree(drive, childRel, d.FullName, priority);
+            else if (entry is FileInfo f && !LocalState.IsPlaceholder(f)) QueueUpload(drive, childRel, f.Length, priority);
+        }
+    }
+
+    /// <summary>The cloud's current view of an item, or null if there's nothing at that path.</summary>
+    private async Task<RemoteItem?> GetRemoteItemAsync(DriveConfig drive, string relativePath, CancellationToken ct)
+    {
+        var url = BuildItemUrl(drive, relativePath);
+        using var resp = await _graph.SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), ct);
+        if (resp.StatusCode == HttpStatusCode.NotFound) return null;
+        if (!resp.IsSuccessStatusCode)
+        {
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            throw new HttpRequestException(
+                $"lookup of {relativePath} failed: {(int)resp.StatusCode} - {Truncate(body, 300)}",
+                inner: null, statusCode: resp.StatusCode);
+        }
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+        return GraphItem.Parse(drive, doc.RootElement, PathUtil.ParentOf(relativePath));
     }
 
     // --- URL builders ---
 
-    private string BuildItemByIdOrPath(DriveConfig drive, SyncOperation op)
+    private static string DriveBase(DriveConfig drive) => drive.IsOneDrive
+        ? "https://graph.microsoft.com/v1.0/me/drive"
+        : "https://graph.microsoft.com/v1.0/drives/" + (drive.ResolvedDriveId
+            ?? throw new InvalidOperationException("SharePoint drive missing ResolvedDriveId"));
+
+    private static string EscapePath(string relativePath) =>
+        string.Join("/", relativePath.Trim('/').Split('/').Select(Uri.EscapeDataString));
+
+    private static string BuildItemByIdUrl(DriveConfig drive, string remoteId) =>
+        $"{DriveBase(drive)}/items/{remoteId}";
+
+    private static string BuildContentUrl(DriveConfig drive, string relativePath) =>
+        $"{DriveBase(drive)}/root:/{EscapePath(relativePath)}:/content";
+
+    private static string BuildCreateUploadSessionUrl(DriveConfig drive, string relativePath) =>
+        $"{DriveBase(drive)}/root:/{EscapePath(relativePath)}:/createUploadSession";
+
+    private static string BuildItemUrl(DriveConfig drive, string relativePath)
     {
-        var remoteId = op.RemoteItemId;
-        if (string.IsNullOrEmpty(remoteId))
-        {
-            var meta = _metadata.Get(drive.ConfigId, op.RelativePath);
-            remoteId = meta?.RemoteItemId;
-        }
-        if (!string.IsNullOrEmpty(remoteId))
-        {
-            if (drive.IsOneDrive)
-                return $"https://graph.microsoft.com/v1.0/me/drive/items/{remoteId}";
-            return $"https://graph.microsoft.com/v1.0/drives/{drive.ResolvedDriveId}/items/{remoteId}";
-        }
-        return BuildItemUrl(drive, op.RelativePath);
+        var rel = relativePath.Trim('/');
+        return string.IsNullOrEmpty(rel) ? $"{DriveBase(drive)}/root" : $"{DriveBase(drive)}/root:/{EscapePath(rel)}";
     }
 
-    private string BuildContentUrl(DriveConfig drive, string relativePath)
+    private static string BuildChildrenUrl(DriveConfig drive, string parentRelativePath)
     {
-        var rel = TrimLeadingSlash(relativePath);
-        if (drive.IsOneDrive)
-            return string.IsNullOrEmpty(rel)
-                ? "https://graph.microsoft.com/v1.0/me/drive/root/content"
-                : $"https://graph.microsoft.com/v1.0/me/drive/root:/{Uri.EscapeDataString(rel).Replace("%2F", "/")}:/content";
-        var driveId = drive.ResolvedDriveId
-            ?? throw new InvalidOperationException("SharePoint drive missing ResolvedDriveId");
-        return $"https://graph.microsoft.com/v1.0/drives/{driveId}/root:/{Uri.EscapeDataString(rel).Replace("%2F", "/")}:/content";
-    }
-
-    private string BuildCreateUploadSessionUrl(DriveConfig drive, string relativePath)
-    {
-        var rel = TrimLeadingSlash(relativePath);
-        if (drive.IsOneDrive)
-            return $"https://graph.microsoft.com/v1.0/me/drive/root:/{Uri.EscapeDataString(rel).Replace("%2F", "/")}:/createUploadSession";
-        var driveId = drive.ResolvedDriveId
-            ?? throw new InvalidOperationException("SharePoint drive missing ResolvedDriveId");
-        return $"https://graph.microsoft.com/v1.0/drives/{driveId}/root:/{Uri.EscapeDataString(rel).Replace("%2F", "/")}:/createUploadSession";
-    }
-
-    private string BuildItemUrl(DriveConfig drive, string relativePath)
-    {
-        var rel = TrimLeadingSlash(relativePath);
-        if (drive.IsOneDrive)
-            return string.IsNullOrEmpty(rel)
-                ? "https://graph.microsoft.com/v1.0/me/drive/root"
-                : $"https://graph.microsoft.com/v1.0/me/drive/root:/{Uri.EscapeDataString(rel).Replace("%2F", "/")}";
-        var driveId = drive.ResolvedDriveId
-            ?? throw new InvalidOperationException("SharePoint drive missing ResolvedDriveId");
+        var rel = parentRelativePath.Trim('/');
         return string.IsNullOrEmpty(rel)
-            ? $"https://graph.microsoft.com/v1.0/drives/{driveId}/root"
-            : $"https://graph.microsoft.com/v1.0/drives/{driveId}/root:/{Uri.EscapeDataString(rel).Replace("%2F", "/")}";
+            ? $"{DriveBase(drive)}/root/children"
+            : $"{DriveBase(drive)}/root:/{EscapePath(rel)}:/children";
     }
-
-    private static string TrimLeadingSlash(string p) => p.TrimStart('/');
 
     private static string Truncate(string s, int maxLen) =>
         s.Length <= maxLen ? s : s.Substring(0, maxLen) + "...";
@@ -680,12 +854,12 @@ internal sealed class UploadWorker
         if (string.IsNullOrWhiteSpace(body)) return null;
         try
         {
-            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            using var doc = JsonDocument.Parse(body);
             if (doc.RootElement.TryGetProperty("error", out var err) &&
                 err.TryGetProperty("message", out var msg))
                 return msg.GetString();
         }
-        catch { /* not JSON or different shape */ }
+        catch { }
         return Truncate(body, 200);
     }
 }

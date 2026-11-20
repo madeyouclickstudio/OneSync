@@ -50,41 +50,135 @@ internal sealed class SyncQueue : IDisposable
     {
         lock (_writeLock)
         {
-            // Coalesce: if a Pending or Retry upload for the same path exists, replace it
-            if (op.Type == SyncOpType.Upload)
-            {
-                var existing = _ops.FindOne(o =>
+            var waiting = _ops.Find(o =>
                     o.DriveConfigId == op.DriveConfigId &&
-                    o.RelativePath == op.RelativePath &&
-                    o.Type == SyncOpType.Upload &&
-                    (o.Status == SyncOpStatus.Pending || o.Status == SyncOpStatus.Retry));
-                if (existing != null)
+                    (o.Status == SyncOpStatus.Pending || o.Status == SyncOpStatus.Retry))
+                .ToList();
+
+            switch (op.Type)
+            {
+                case SyncOpType.Upload:
                 {
-                    existing.QueuedAt = DateTime.UtcNow;
-                    existing.FileSizeBytes = op.FileSizeBytes;
-                    existing.ContentHash = op.ContentHash;
-                    existing.Status = SyncOpStatus.Pending;
-                    existing.ErrorMessage = null;
-                    _ops.Update(existing);
-                    return;
+                    // One waiting upload per path; a newer save just refreshes it.
+                    var existing = waiting.FirstOrDefault(o =>
+                        o.Type == SyncOpType.Upload && SamePath(o.RelativePath, op.RelativePath));
+                    if (existing != null)
+                    {
+                        existing.FileSizeBytes = op.FileSizeBytes;
+                        existing.ContentHash = op.ContentHash;
+                        existing.Status = SyncOpStatus.Pending;
+                        existing.NextAttemptAt = null;
+                        existing.ErrorMessage = null;
+                        _ops.Update(existing);
+                        return;
+                    }
+                    break;
+                }
+                case SyncOpType.RemoteCreateFolder:
+                    if (waiting.Any(o => o.Type == SyncOpType.RemoteCreateFolder && SamePath(o.RelativePath, op.RelativePath)))
+                        return;
+                    break;
+                case SyncOpType.RemoteDelete:
+                {
+                    if (waiting.Any(o => o.Type == SyncOpType.RemoteDelete && SamePath(o.RelativePath, op.RelativePath)))
+                        return;
+                    // Nothing left to upload once it's deleted.
+                    foreach (var o in waiting.Where(o =>
+                                 (o.Type == SyncOpType.Upload || o.Type == SyncOpType.RemoteCreateFolder) &&
+                                 Util.PathUtil.IsSameOrUnder(o.RelativePath, op.RelativePath)))
+                        _ops.Delete(o.Id);
+                    break;
                 }
             }
             _ops.Insert(op);
         }
     }
 
-    public List<SyncOperation> GetPending(int max = 100)
+    private static bool SamePath(string a, string b) =>
+        string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Operations ready to run, oldest first. An operation waits while an older
+    /// one on the same path is still outstanding, and anything under a folder
+    /// waits for an older create, rename or delete of that folder, so the cloud
+    /// sees changes in the order they were made.
+    /// </summary>
+    public List<SyncOperation> GetPending(int max = 100, bool ignoreBackoff = false)
     {
         var now = DateTime.UtcNow;
+        List<SyncOperation> outstanding;
         lock (_writeLock)
         {
-            return _ops.Query()
-                .Where(o => (o.Status == SyncOpStatus.Pending || o.Status == SyncOpStatus.Retry)
-                            && (o.NextAttemptAt == null || o.NextAttemptAt <= now))
-                .OrderBy(o => o.Priority)
-                .Limit(max)
+            outstanding = _ops.Find(o =>
+                    o.Status == SyncOpStatus.Pending ||
+                    o.Status == SyncOpStatus.Retry ||
+                    o.Status == SyncOpStatus.InProgress)
                 .ToList();
         }
+
+        var busyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var busyTrees = new List<(string Drive, string Path)>();
+        var ready = new List<SyncOperation>();
+
+        foreach (var op in outstanding.OrderBy(o => o.QueuedAt).ThenBy(o => o.Id))
+        {
+            bool blocked =
+                IsBusy(op.DriveConfigId, op.RelativePath, busyPaths, busyTrees) ||
+                (op.NewRelativePath != null && IsBusy(op.DriveConfigId, op.NewRelativePath, busyPaths, busyTrees));
+
+            bool due = op.Status != SyncOpStatus.InProgress &&
+                       (ignoreBackoff || op.NextAttemptAt == null || op.NextAttemptAt <= now);
+
+            if (!blocked && due && ready.Count < max) ready.Add(op);
+
+            busyPaths.Add(op.DriveConfigId + "|" + op.RelativePath);
+            if (op.NewRelativePath != null) busyPaths.Add(op.DriveConfigId + "|" + op.NewRelativePath);
+            if (op.Type != SyncOpType.Upload)
+            {
+                busyTrees.Add((op.DriveConfigId, op.RelativePath));
+                if (op.NewRelativePath != null) busyTrees.Add((op.DriveConfigId, op.NewRelativePath));
+            }
+        }
+
+        return ready.OrderBy(o => o.Priority).ToList();
+    }
+
+    private static bool IsBusy(string drive, string path, HashSet<string> busyPaths,
+        List<(string Drive, string Path)> busyTrees)
+    {
+        if (busyPaths.Contains(drive + "|" + path)) return true;
+        foreach (var t in busyTrees)
+            if (t.Drive == drive && Util.PathUtil.IsSameOrUnder(path, t.Path)) return true;
+        return false;
+    }
+
+    /// <summary>Drops uploads and folder creates still waiting for this path or
+    /// anything under it. Returns how many were dropped.</summary>
+    public int CancelWaitingUploads(string driveConfigId, string relativePath)
+    {
+        lock (_writeLock)
+        {
+            var doomed = _ops.Find(o =>
+                    o.DriveConfigId == driveConfigId &&
+                    (o.Type == SyncOpType.Upload || o.Type == SyncOpType.RemoteCreateFolder) &&
+                    (o.Status == SyncOpStatus.Pending || o.Status == SyncOpStatus.Retry))
+                .Where(o => Util.PathUtil.IsSameOrUnder(o.RelativePath, relativePath))
+                .ToList();
+            foreach (var o in doomed) _ops.Delete(o.Id);
+            return doomed.Count;
+        }
+    }
+
+    /// <summary>Paths with uploads still to send. Logoff cleanup keeps these files.</summary>
+    public List<SyncOperation> GetOutstanding()
+    {
+        lock (_writeLock)
+            return _ops.Find(o =>
+                    o.Status == SyncOpStatus.Pending ||
+                    o.Status == SyncOpStatus.Retry ||
+                    o.Status == SyncOpStatus.InProgress ||
+                    o.Status == SyncOpStatus.Failed)
+                .ToList();
     }
 
     public int CountPending()
@@ -111,9 +205,10 @@ internal sealed class SyncQueue : IDisposable
     {
         lock (_writeLock)
         {
+            var rel = relativePath;
             return _ops.Exists(o =>
                 o.DriveConfigId == driveConfigId
-                && o.RelativePath == relativePath
+                && (o.RelativePath == rel || o.NewRelativePath == rel)
                 && (o.Status == SyncOpStatus.Pending
                     || o.Status == SyncOpStatus.InProgress
                     || o.Status == SyncOpStatus.Retry));

@@ -484,53 +484,8 @@ internal static class Program
                     try
                     {
                         var d = drive; // capture for closure
-                        Action<string, System.IO.WatcherChangeTypes> onLocalChange = (path, change) =>
-                        {
-                            if (change != System.IO.WatcherChangeTypes.Deleted) return;
-                            var rel = path.Substring(d.LocalRootPath.Length)
-                                .TrimStart(System.IO.Path.DirectorySeparatorChar)
-                                .Replace(System.IO.Path.DirectorySeparatorChar, '/');
-
-                            // Honor excludePatterns on the delete path too. Without this,
-                            // deleting a vim swap file (or other excluded type) queues a
-                            // remote delete that 404s harmlessly but burns a Graph call.
-                            var basename = System.IO.Path.GetFileName(path);
-                            foreach (var pat in config.SyncSettings.ExcludePatterns)
-                            {
-                                if (PathUtil.MatchesGlob(basename, pat))
-                                {
-                                    logger.Debug("Local delete ignored (excludePatterns match {Pat}): {Path}", pat, rel);
-                                    return;
-                                }
-                            }
-
-                            var meta = syncEngine.Metadata.Get(d.ConfigId, rel);
-                            if (meta != null && !string.IsNullOrEmpty(meta.RemoteItemId))
-                            {
-                                syncEngine.Metadata.AddDeleted(new DeletedItem
-                                {
-                                    RemoteItemId = meta.RemoteItemId,
-                                    DriveConfigId = d.ConfigId,
-                                    DriveLetter = d.Letter,
-                                    RelativePath = rel,
-                                    Name = meta.Name,
-                                    IsFolder = meta.IsFolder,
-                                    Size = meta.Size,
-                                    DeletedAtUtc = DateTime.UtcNow,
-                                    LastModifiedDateTime = meta.LastModifiedDateTime,
-                                });
-                            }
-
-                            syncEngine.Queue.Enqueue(new SyncOperation
-                            {
-                                Type = SyncOpType.RemoteDelete,
-                                DriveConfigId = d.ConfigId,
-                                DriveLetter = d.Letter,
-                                RelativePath = rel,
-                                Priority = d.Priority,
-                            });
-                            logger.Information("Dokan delete -> queued remote delete: {Drive}:{Path}", d.Letter, rel);
-                        };
+                        Action<string, System.IO.WatcherChangeTypes> onLocalChange =
+                            (path, _) => syncEngine.NotifyLocalChange(d, path);
                         var mounted = driveMgr.Mount(drive, quotaCache,
                             onLocalChange: onLocalChange,
                             hydration: syncEngine.HydrationTrigger);

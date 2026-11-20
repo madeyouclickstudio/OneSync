@@ -153,81 +153,42 @@ internal sealed class CooperativePollingService : IAsyncDisposable
 
         var metadata = dc.SyncEngine.Metadata;
         var placeholders = dc.SyncEngine.Placeholders;
-        var suppressor = dc.SyncEngine.Suppressor;
 
         int created = 0, updated = 0, skipped = 0;
-        suppressor.Suppress(dc.Drive.LocalRootPath);
-        try
+        foreach (var ci in payload.Items)
         {
-            foreach (var ci in payload.Items)
+            var existing = metadata.Get(dc.Drive.ConfigId, ci.Path);
+            if (existing is not null && existing.ETag == ci.ETag && existing.Size == ci.Size)
             {
-                var key = RemoteItem.MakeKey(dc.Drive.ConfigId, ci.Path);
-                var existing = metadata.Get(dc.Drive.ConfigId, ci.Path);
-
-                if (existing is null)
-                {
-                    var fresh = new RemoteItem
-                    {
-                        Key = key,
-                        DriveConfigId = dc.Drive.ConfigId,
-                        RemoteItemId = ci.Id,
-                        ParentRemoteItemId = ci.ParentId,
-                        RelativePath = ci.Path,
-                        Name = ci.Name,
-                        IsFolder = ci.IsFolder,
-                        Size = ci.Size,
-                        ETag = ci.ETag,
-                        WebUrl = ci.WebUrl,
-                        LastModifiedDateTime = ci.LastModified,
-                        LastSyncedAt = DateTime.UtcNow,
-                    };
-                    metadata.Upsert(fresh);
-                    try { placeholders.CreateOrUpdate(dc.Drive, fresh); }
-                    catch (Exception ex) { _logger.Debug(ex, "Placeholder create failed for {Path}", ci.Path); }
-                    created++;
-                }
-                else if (existing.ETag != ci.ETag || existing.Size != ci.Size)
-                {
-                    // Copy-on-write rather than mutating the existing instance in
-                    // place. A concurrent DeltaPoller / HydrationService can hold
-                    // a reference to the same object; mutating it field-by-field
-                    // would publish torn intermediate state to those readers.
-                    // Preserves fields that aren't replicated through the cache
-                    // (Hydrated, LastAccessedAt, PlaceholderCreated, etc.).
-                    var updatedItem = new RemoteItem
-                    {
-                        Key = existing.Key,
-                        DriveConfigId = existing.DriveConfigId,
-                        RemoteItemId = ci.Id,
-                        ParentRemoteItemId = ci.ParentId,
-                        RelativePath = existing.RelativePath,
-                        Name = ci.Name,
-                        IsFolder = existing.IsFolder,
-                        Size = ci.Size,
-                        ETag = ci.ETag,
-                        WebUrl = ci.WebUrl,
-                        ContentHash = existing.ContentHash,
-                        LastModifiedDateTime = ci.LastModified,
-                        CreatedDateTime = existing.CreatedDateTime,
-                        Hydrated = existing.Hydrated,
-                        PlaceholderCreated = existing.PlaceholderCreated,
-                        LastSyncedAt = DateTime.UtcNow,
-                        LastAccessedAt = existing.LastAccessedAt,
-                    };
-                    metadata.Upsert(updatedItem);
-                    try { placeholders.CreateOrUpdate(dc.Drive, updatedItem); }
-                    catch (Exception ex) { _logger.Debug(ex, "Placeholder update failed for {Path}", ci.Path); }
-                    updated++;
-                }
-                else
-                {
-                    skipped++;
-                }
+                skipped++;
+                continue;
             }
-        }
-        finally
-        {
-            suppressor.Release(dc.Drive.LocalRootPath);
+
+            var incoming = new RemoteItem
+            {
+                Key = RemoteItem.MakeKey(dc.Drive.ConfigId, ci.Path),
+                DriveConfigId = dc.Drive.ConfigId,
+                RemoteItemId = ci.Id,
+                ParentRemoteItemId = ci.ParentId,
+                RelativePath = ci.Path,
+                Name = ci.Name,
+                IsFolder = ci.IsFolder,
+                Size = ci.Size,
+                ETag = ci.ETag,
+                WebUrl = ci.WebUrl,
+                LastModifiedDateTime = ci.LastModified,
+                CreatedDateTime = existing?.CreatedDateTime ?? default,
+                LastSyncedAt = DateTime.UtcNow,
+            };
+            try
+            {
+                if (placeholders.ApplyRemote(dc.Drive, incoming) == PlaceholderManager.ApplyResult.Created) created++;
+                else updated++;
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug(ex, "Could not apply cached item {Path}", ci.Path);
+            }
         }
 
         _logger.Information(

@@ -41,6 +41,8 @@ internal static class PathUtil
         return trimmed.Replace('/', Path.DirectorySeparatorChar);
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> GlobCache = new();
+
     /// <summary>
     /// Case-insensitive glob match of a single file name against one pattern.
     /// Supports * and ? wildcards; a pattern with no wildcards is an exact match.
@@ -50,10 +52,28 @@ internal static class PathUtil
         if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(pattern)) return false;
         if (pattern.Contains('*') || pattern.Contains('?'))
         {
-            var regex = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
-            return Regex.IsMatch(name, regex, RegexOptions.IgnoreCase);
+            var regex = GlobCache.GetOrAdd(pattern, p => new Regex(
+                "^" + Regex.Escape(p).Replace("\\*", ".*").Replace("\\?", ".") + "$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled));
+            return regex.IsMatch(name);
         }
         return string.Equals(name, pattern, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Parent of a POSIX relative path ("/a/b/c.txt" -> "/a/b", "/a" -> "/").</summary>
+    public static string ParentOf(string relativePath)
+    {
+        var p = NormalizeRelative(relativePath).TrimEnd('/');
+        var idx = p.LastIndexOf('/');
+        return idx <= 0 ? "/" : p[..idx];
+    }
+
+    /// <summary>True if <paramref name="path"/> equals <paramref name="root"/> or sits underneath it.</summary>
+    public static bool IsSameOrUnder(string path, string root)
+    {
+        if (root == "/") return true;
+        return path.Equals(root, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(root.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>True if the file name component of <paramref name="path"/> matches any glob pattern.</summary>

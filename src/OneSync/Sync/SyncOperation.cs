@@ -11,6 +11,7 @@ internal enum SyncOpType
     Rename,
     RemoteDelete,
     RemoteRename,
+    RemoteCreateFolder,
 }
 
 internal enum SyncOpStatus

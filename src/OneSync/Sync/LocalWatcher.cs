@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using OneSync.Config;
 using OneSync.Util;
@@ -11,8 +10,11 @@ using Timer = System.Threading.Timer;
 namespace OneSync.Sync;
 
 /// <summary>
-/// Watches a single local drive root for filesystem changes, debounces rapid
-/// repeats, applies exclusion filters, and enqueues sync operations.
+/// Watches one drive's local folder and queues the changes the user makes.
+/// Events for a path are debounced; when the path settles we look at what is
+/// actually on disk and queue whatever brings the cloud in line with it. That
+/// way a burst of events (an Office save is a create, two renames and a delete)
+/// always ends in the right result, whatever order the events arrived in.
 /// </summary>
 internal sealed class LocalWatcher : IDisposable
 {
@@ -23,8 +25,15 @@ internal sealed class LocalWatcher : IDisposable
     private readonly LocalChangeSuppressor? _suppressor;
     private readonly MetadataStore? _metadata;
     private FileSystemWatcher? _fsw;
-    private readonly ConcurrentDictionary<string, Timer> _debounceTimers = new();
+    private readonly ConcurrentDictionary<string, Timer> _pending = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _settleLock = new();
     private bool _disposed;
+
+    /// <summary>Raised when the watcher's buffer overflowed and events were lost,
+    /// so a full scan is needed to catch up.</summary>
+    public event Action<DriveConfig>? EventsLost;
+
+    public DriveConfig Drive => _drive;
 
     public LocalWatcher(DriveConfig drive, SyncQueue queue, SyncSettings settings, ILogger logger,
         LocalChangeSuppressor? suppressor = null, MetadataStore? metadata = null)
@@ -49,7 +58,7 @@ internal sealed class LocalWatcher : IDisposable
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
                 | NotifyFilters.LastWrite | NotifyFilters.Size
                 | NotifyFilters.CreationTime,
-            Filter = "*.*",
+            Filter = "*",
             InternalBufferSize = 65536,
         };
         _fsw.Created += OnCreated;
@@ -62,6 +71,8 @@ internal sealed class LocalWatcher : IDisposable
         _logger.Information("LocalWatcher started for {Path}", _drive.LocalRootPath);
     }
 
+    /// <summary>Stops watching. Changes still waiting out their debounce are
+    /// queued now rather than dropped.</summary>
     public void Stop()
     {
         if (_fsw is null) return;
@@ -69,57 +80,52 @@ internal sealed class LocalWatcher : IDisposable
         _fsw.Dispose();
         _fsw = null;
 
-        foreach (var kvp in _debounceTimers)
-            kvp.Value.Dispose();
-        _debounceTimers.Clear();
+        foreach (var path in _pending.Keys)
+        {
+            if (_pending.TryRemove(path, out var timer))
+            {
+                timer.Dispose();
+                Settle(path);
+            }
+        }
 
         _logger.Information("LocalWatcher stopped for {Path}", _drive.LocalRootPath);
     }
 
-    private bool ShouldExclude(string path)
+    /// <summary>Names and places that are never synced (Office lock and temp
+    /// files, the recycle bin and so on).</summary>
+    internal static bool IsIgnoredName(string path, SyncSettings settings)
     {
-        if (_suppressor?.IsSuppressed(path) == true) return true;
-
         var name = Path.GetFileName(path);
         if (string.IsNullOrEmpty(name)) return false;
 
-        // Hydration temp files - never queue these as user changes
-        if (name.EndsWith(".hydrate.tmp", StringComparison.OrdinalIgnoreCase)) return true;
-
-        foreach (var pattern in _settings.ExcludePatterns)
-        {
+        foreach (var pattern in settings.ExcludePatterns)
             if (PathUtil.MatchesGlob(name, pattern)) return true;
-        }
 
+        return path.Contains("$Recycle.Bin", StringComparison.OrdinalIgnoreCase) ||
+               path.Contains("System Volume Information", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsIgnored(string path)
+    {
+        if (IsIgnoredName(path, _settings)) return true;
         try
         {
-            if (File.Exists(path))
-            {
-                var attrs = File.GetAttributes(path);
-                if ((attrs & FileAttributes.Temporary) == FileAttributes.Temporary) return true;
-            }
+            if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.Temporary) != 0) return true;
         }
-        catch { /* ignore */ }
-
-        if (path.Contains("$Recycle.Bin", StringComparison.OrdinalIgnoreCase) ||
-            path.Contains("System Volume Information", StringComparison.OrdinalIgnoreCase))
-            return true;
-
+        catch { }
         return false;
     }
 
-    private string ToRelativePath(string fullPath)
-    {
-        var rel = Path.GetRelativePath(_drive.LocalRootPath, fullPath);
-        rel = rel.Replace(Path.DirectorySeparatorChar, '/');
-        if (!rel.StartsWith('/')) rel = "/" + rel;
-        return rel;
-    }
+    private bool IsOwnWrite(string path) => _suppressor?.IsSuppressed(path) == true;
 
-    private void Debounce(string path, Action action)
+    private string ToRelativePath(string fullPath) =>
+        PathUtil.NormalizeRelative(Path.GetRelativePath(_drive.LocalRootPath, fullPath));
+
+    private void Schedule(string path)
     {
-        _debounceTimers.AddOrUpdate(path,
-            _ => CreateDebounceTimer(path, action),
+        _pending.AddOrUpdate(path,
+            p => new Timer(_ => Fire(p), null, _settings.UploadDebounceMs, Timeout.Infinite),
             (_, existing) =>
             {
                 existing.Change(_settings.UploadDebounceMs, Timeout.Infinite);
@@ -127,114 +133,89 @@ internal sealed class LocalWatcher : IDisposable
             });
     }
 
-    private Timer CreateDebounceTimer(string path, Action action)
+    /// <summary>A change reported by the drive itself rather than the folder watcher.</summary>
+    public void NotifyChanged(string fullPath)
     {
-        Timer? timer = null;
-        timer = new Timer(_ =>
-        {
-            _debounceTimers.TryRemove(path, out var t);
-            t?.Dispose();
-            try { action(); }
-            catch (Exception ex) { _logger.Warning(ex, "Debounced action failed for {Path}", path); }
-        }, null, _settings.UploadDebounceMs, Timeout.Infinite);
-        return timer;
+        if (IsOwnWrite(fullPath) || IsIgnoredName(fullPath, _settings)) return;
+        Schedule(fullPath);
+    }
+
+    private void Fire(string path)
+    {
+        if (_pending.TryRemove(path, out var timer)) timer.Dispose();
+        Settle(path);
     }
 
     private void OnCreated(object sender, FileSystemEventArgs e)
     {
-        if (ShouldExclude(e.FullPath)) return;
-
-        // Tell Explorer immediately so the new file appears in any open
-        // folder view without F5. The user perceives it as "saved into the
-        // folder and it's just there" — which is how Explorer usually
-        // behaves over native NTFS but doesn't for Dokan-mapped drives.
-        try
-        {
-            var rel = ToRelativePath(e.FullPath);
-            var isFolder = Directory.Exists(e.FullPath);
-            ShellNotifier.NotifyCreated(_drive, rel, isFolder);
-        }
+        if (IsOwnWrite(e.FullPath) || IsIgnored(e.FullPath)) return;
+        try { ShellNotifier.NotifyCreated(_drive, ToRelativePath(e.FullPath), Directory.Exists(e.FullPath)); }
         catch { }
-
-        Debounce(e.FullPath, () => EnqueueUpload(e.FullPath, isNew: true));
+        Schedule(e.FullPath);
     }
 
     private void OnChanged(object sender, FileSystemEventArgs e)
     {
-        if (ShouldExclude(e.FullPath)) return;
-        // Filter out directory changes (we only care about file content)
+        if (IsOwnWrite(e.FullPath) || IsIgnored(e.FullPath)) return;
         if (Directory.Exists(e.FullPath)) return;
-
-        // Refresh Explorer's view (size column, modified date, etc.)
-        try
-        {
-            var rel = ToRelativePath(e.FullPath);
-            ShellNotifier.NotifyUpdated(_drive, rel);
-        }
+        try { ShellNotifier.NotifyUpdated(_drive, ToRelativePath(e.FullPath)); }
         catch { }
-
-        Debounce(e.FullPath, () => EnqueueUpload(e.FullPath, isNew: false));
+        Schedule(e.FullPath);
     }
 
     private void OnDeleted(object sender, FileSystemEventArgs e)
     {
-        if (ShouldExclude(e.FullPath)) return;
-        var rel = ToRelativePath(e.FullPath);
-        var capturedPath = e.FullPath;
-
-        // Tell Explorer the entry is gone so it disappears from open views.
-        try { ShellNotifier.NotifyDeleted(_drive, rel); } catch { }
-
-        // Defensive: a delete event during hydration (file replaced) can race. Only
-        // queue a remote delete if the file is STILL gone after a short grace period
-        // AND was not suppressed.
-        Debounce(capturedPath, () =>
-        {
-            if (_suppressor?.IsSuppressed(capturedPath) == true) return;
-            if (File.Exists(capturedPath) || Directory.Exists(capturedPath))
-            {
-                _logger.Debug("Skipping remote delete - path reappeared (likely hydration race): {Path}", rel);
-                return;
-            }
-
-            _queue.Enqueue(new SyncOperation
-            {
-                Type = SyncOpType.RemoteDelete,
-                DriveConfigId = _drive.ConfigId,
-                DriveLetter = _drive.Letter,
-                RelativePath = rel,
-                Priority = _drive.Priority,
-            });
-            _logger.Information("Queued remote delete: {Drive}:{Path}", _drive.Letter, rel);
-        });
+        if (IsOwnWrite(e.FullPath) || IsIgnoredName(e.FullPath, _settings)) return;
+        try { ShellNotifier.NotifyDeleted(_drive, ToRelativePath(e.FullPath)); }
+        catch { }
+        Schedule(e.FullPath);
     }
 
     private void OnRenamed(object sender, RenamedEventArgs e)
     {
-        // Ignore renames where source or target is a hydration tmp file - those are not user renames.
-        if (ShouldExclude(e.FullPath) || ShouldExclude(e.OldFullPath)) return;
+        if (IsOwnWrite(e.FullPath) && IsOwnWrite(e.OldFullPath)) return;
 
-        // Tell Explorer about the rename so views update in place.
+        bool oldIgnored = IsIgnoredName(e.OldFullPath, _settings);
+        bool newIgnored = IsIgnored(e.FullPath);
+
         try
         {
-            var oldRelForShell = ToRelativePath(e.OldFullPath);
-            var newRelForShell = ToRelativePath(e.FullPath);
-            var isFolder = Directory.Exists(e.FullPath);
-            ShellNotifier.NotifyRenamed(_drive, oldRelForShell, newRelForShell, isFolder);
+            ShellNotifier.NotifyRenamed(_drive, ToRelativePath(e.OldFullPath), ToRelativePath(e.FullPath),
+                Directory.Exists(e.FullPath));
         }
         catch { }
 
-        // Also skip if the new name is in metadata (a synced file). Hydration moves a temp
-        // file to a known remote path; we don't want to issue a remote rename in that case.
-        var newRel = ToRelativePath(e.FullPath);
-        var meta = _metadata?.Get(_drive.ConfigId, newRel);
-        if (meta != null && !meta.IsFolder)
+        if (oldIgnored && newIgnored) return;
+
+        if (oldIgnored || newIgnored)
         {
-            _logger.Debug("Skipping rename to known remote path (likely hydration): {Path}", newRel);
+            // Half of a save: an app moving the real file aside, or moving its temp
+            // file into place. Either way, settle whichever real name was involved.
+            Schedule(oldIgnored ? e.FullPath : e.OldFullPath);
             return;
         }
 
-        var oldRel = ToRelativePath(e.OldFullPath);
+        lock (_settleLock)
+            QueueRename(e.OldFullPath, e.FullPath);
+    }
+
+    private void QueueRename(string oldFull, string newFull)
+    {
+        var oldRel = ToRelativePath(oldFull);
+        var newRel = ToRelativePath(newFull);
+        var meta = _metadata?.Get(_drive.ConfigId, oldRel);
+
+        if (meta is null || string.IsNullOrEmpty(meta.RemoteItemId))
+        {
+            // Never reached the cloud under the old name: just send what's there now.
+            _queue.CancelWaitingUploads(_drive.ConfigId, oldRel);
+            Schedule(newFull);
+            return;
+        }
+
+        // Move our record with the file so the new name isn't mistaken for a new,
+        // unsynced file, then rename the cloud item.
+        _metadata!.MovePath(_drive.ConfigId, oldRel, newRel);
         _queue.Enqueue(new SyncOperation
         {
             Type = SyncOpType.RemoteRename,
@@ -242,9 +223,18 @@ internal sealed class LocalWatcher : IDisposable
             DriveLetter = _drive.Letter,
             RelativePath = oldRel,
             NewRelativePath = newRel,
+            RemoteItemId = meta.RemoteItemId,
             Priority = _drive.Priority,
         });
-        _logger.Debug("Queued remote rename: {Drive}:{Old} -> {New}", _drive.Letter, oldRel, newRel);
+        _logger.Information("Queued remote rename: {Drive}:{Old} -> {New}", _drive.Letter, oldRel, newRel);
+
+        // The old name may have been the target of a debounced save; that save
+        // now belongs to the new name.
+        if (_pending.TryRemove(oldFull, out var t))
+        {
+            t.Dispose();
+            Schedule(newFull);
+        }
     }
 
     private void OnError(object sender, ErrorEventArgs e)
@@ -252,70 +242,162 @@ internal sealed class LocalWatcher : IDisposable
         _logger.Error(e.GetException(), "FileSystemWatcher error on {Path} - restarting", _drive.LocalRootPath);
         try
         {
-            Stop();
+            if (_fsw != null)
+            {
+                _fsw.EnableRaisingEvents = false;
+                _fsw.Dispose();
+                _fsw = null;
+            }
             Start();
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Could not restart FileSystemWatcher");
         }
+        try { EventsLost?.Invoke(_drive); } catch { }
     }
 
-    private void EnqueueUpload(string fullPath, bool isNew)
+    /// <summary>Looks at a path that has stopped changing and queues whatever the
+    /// cloud needs to match it.</summary>
+    private void Settle(string fullPath)
     {
-        if (!File.Exists(fullPath)) return;
-        var rel = ToRelativePath(fullPath);
         try
         {
-            var fi = new FileInfo(fullPath);
-
-            // Skip placeholders and hydration results - these are not user-originated changes.
-            //
-            // A file is a placeholder if metadata exists for it and the local size is 0.
-            // A file is a hydration result if its local size exactly matches the remote size
-            // and the metadata says it's already hydrated. In both cases the local content
-            // is system-generated, not user-edited, and we should not push it back to the cloud.
-            if (_metadata != null)
+            lock (_settleLock)
             {
-                var meta = _metadata.Get(_drive.ConfigId, rel);
-                if (meta != null && !meta.IsFolder)
+                if (IsOwnWrite(fullPath)) return;
+                var rel = ToRelativePath(fullPath);
+
+                if (Directory.Exists(fullPath))
                 {
-                    if (fi.Length == 0)
-                    {
-                        _logger.Debug("Skipping upload of placeholder (0 bytes): {Path}", rel);
-                        return;
-                    }
-                    if (meta.Hydrated && fi.Length == meta.Size)
-                    {
-                        _logger.Debug("Skipping upload of hydrated file (matches remote): {Path}", rel);
-                        return;
-                    }
+                    var meta = _metadata?.Get(_drive.ConfigId, rel);
+                    if (meta is null || !meta.IsFolder)
+                        QueueNewTree(fullPath, rel);
+                    return;
                 }
-            }
 
-            if (fi.Length > _settings.MaxFileSizeMB * 1024L * 1024L)
-            {
-                _logger.Warning("Skipping {Path}: file size {Size} exceeds max {Max} MB",
-                    rel, fi.Length, _settings.MaxFileSizeMB);
-                return;
-            }
+                if (File.Exists(fullPath))
+                {
+                    if (IsIgnored(fullPath)) return;
+                    QueueUploadIfChanged(fullPath, rel);
+                    return;
+                }
 
-            _queue.Enqueue(new SyncOperation
-            {
-                Type = SyncOpType.Upload,
-                DriveConfigId = _drive.ConfigId,
-                DriveLetter = _drive.Letter,
-                RelativePath = rel,
-                Priority = _drive.Priority,
-                FileSizeBytes = fi.Length,
-            });
-            _logger.Information("Queued upload: {Drive}:{Path} ({Size} bytes, {Kind})",
-                _drive.Letter, rel, fi.Length, isNew ? "new" : "changed");
+                QueueDeleteIfKnown(rel);
+            }
         }
         catch (Exception ex)
         {
-            _logger.Warning(ex, "Could not enqueue upload for {Path}", fullPath);
+            _logger.Warning(ex, "Could not queue change for {Path}", fullPath);
         }
+    }
+
+    /// <summary>A folder we have no record of (made, copied or moved in): create
+    /// it and send anything inside it, since its contents may not raise events
+    /// of their own.</summary>
+    private void QueueNewTree(string fullPath, string rel)
+    {
+        QueueFolder(rel);
+        foreach (var entry in new DirectoryInfo(fullPath).EnumerateFileSystemInfos())
+        {
+            if (IsIgnored(entry.FullName)) continue;
+            var childRel = rel.TrimEnd('/') + "/" + entry.Name;
+            if (entry is DirectoryInfo)
+            {
+                var meta = _metadata?.Get(_drive.ConfigId, childRel);
+                if (meta is null || !meta.IsFolder) QueueNewTree(entry.FullName, childRel);
+            }
+            else
+            {
+                QueueUploadIfChanged(entry.FullName, childRel);
+            }
+        }
+    }
+
+    private void QueueFolder(string rel)
+    {
+        _queue.Enqueue(new SyncOperation
+        {
+            Type = SyncOpType.RemoteCreateFolder,
+            DriveConfigId = _drive.ConfigId,
+            DriveLetter = _drive.Letter,
+            RelativePath = rel,
+            Priority = _drive.Priority,
+        });
+        _logger.Information("Queued folder create: {Drive}:{Path}", _drive.Letter, rel);
+    }
+
+    private void QueueUploadIfChanged(string fullPath, string rel)
+    {
+        var fi = new FileInfo(fullPath);
+        var meta = _metadata?.Get(_drive.ConfigId, rel);
+
+        if (!LocalState.IsDirty(fi, meta) && meta?.RemoteChangedSinceBaseline != true)
+            return;
+
+        if (fi.Length > _settings.MaxFileSizeMB * 1024L * 1024L)
+        {
+            _logger.Warning("Skipping {Path}: file size {Size} exceeds max {Max} MB",
+                rel, fi.Length, _settings.MaxFileSizeMB);
+            return;
+        }
+
+        _queue.Enqueue(new SyncOperation
+        {
+            Type = SyncOpType.Upload,
+            DriveConfigId = _drive.ConfigId,
+            DriveLetter = _drive.Letter,
+            RelativePath = rel,
+            Priority = _drive.Priority,
+            FileSizeBytes = fi.Length,
+        });
+        _logger.Information("Queued upload: {Drive}:{Path} ({Size} bytes, {Kind})",
+            _drive.Letter, rel, fi.Length, meta is null ? "new" : "changed");
+    }
+
+    private void QueueDeleteIfKnown(string rel)
+    {
+        // Part of a folder that was deleted as a whole: the folder's own delete covers it.
+        var parent = PathUtil.ParentOf(rel);
+        if (parent != "/" && !Directory.Exists(PlaceholderManager.LocalPathFor(_drive, parent)) &&
+            _metadata?.Get(_drive.ConfigId, parent) is { IsFolder: true })
+        {
+            _queue.CancelWaitingUploads(_drive.ConfigId, rel);
+            return;
+        }
+
+        var meta = _metadata?.Get(_drive.ConfigId, rel);
+        bool waiting = _queue.CancelWaitingUploads(_drive.ConfigId, rel) > 0;
+        if (meta is null)
+        {
+            if (waiting)
+                _logger.Information("Dropped queued upload of {Path}: deleted before it was sent", rel);
+            return;
+        }
+
+        _queue.Enqueue(new SyncOperation
+        {
+            Type = SyncOpType.RemoteDelete,
+            DriveConfigId = _drive.ConfigId,
+            DriveLetter = _drive.Letter,
+            RelativePath = rel,
+            RemoteItemId = string.IsNullOrEmpty(meta.RemoteItemId) ? null : meta.RemoteItemId,
+            Priority = _drive.Priority,
+        });
+        _metadata!.AddDeleted(new DeletedItem
+        {
+            RemoteItemId = meta.RemoteItemId,
+            DriveConfigId = _drive.ConfigId,
+            DriveLetter = _drive.Letter,
+            RelativePath = rel,
+            Name = meta.Name,
+            IsFolder = meta.IsFolder,
+            Size = meta.Size,
+            DeletedAtUtc = DateTime.UtcNow,
+            LastModifiedDateTime = meta.LastModifiedDateTime,
+        });
+        _metadata.DeleteTree(_drive.ConfigId, rel);
+        _logger.Information("Queued remote delete: {Drive}:{Path}", _drive.Letter, rel);
     }
 
     public void Dispose()

@@ -80,7 +80,7 @@ internal sealed class RecycleBinViewModel : INotifyPropertyChanged
 
         var (success, error) = await Task.Run(() => _service.RestoreAsync(item.Model));
 
-        _dispatcher.BeginInvoke(() =>
+        _ = _dispatcher.BeginInvoke(() =>
         {
             if (success)
             {

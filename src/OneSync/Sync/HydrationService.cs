@@ -118,9 +118,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
     {
         var meta = _metadata.Get(drive.ConfigId, relativePath);
         if (meta == null || meta.IsFolder) return false;
-
-        if (meta.Hydrated && File.Exists(localPath) && new FileInfo(localPath).Length == meta.Size)
-            return true; // already done
+        if (HasLocalContent(meta, localPath)) return true;
 
         var sem = _locks.GetOrAdd(localPath, _ => new SemaphoreSlim(1, 1));
         await sem.WaitAsync(ct);
@@ -129,8 +127,7 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
             // Re-check after acquiring lock - another thread may have done it
             meta = _metadata.Get(drive.ConfigId, relativePath);
             if (meta == null) return false;
-            if (meta.Hydrated && File.Exists(localPath) && new FileInfo(localPath).Length == meta.Size)
-                return true;
+            if (HasLocalContent(meta, localPath)) return true;
 
             return await DownloadAsync(drive, meta, localPath, ct);
         }
@@ -138,6 +135,23 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         {
             sem.Release();
         }
+    }
+
+    /// <summary>
+    /// True when the local file is something other than a placeholder waiting to
+    /// be downloaded. A download only ever replaces a placeholder, never a file
+    /// with content of its own.
+    /// </summary>
+    private static bool HasLocalContent(RemoteItem meta, string localPath)
+    {
+        var fi = new FileInfo(localPath);
+        if (!fi.Exists) return false;
+        if (LocalState.IsPlaceholder(fi)) return meta.Size == 0;
+        if (LocalState.IsInterruptedDownload(fi, meta)) return false;
+        if (fi.Length > 0) return true;
+        // Empty, not sparse: either a file someone emptied, or a placeholder from
+        // an older version that never got its sparse flag.
+        return meta.Size == 0 || meta.Hydrated || LocalState.HasBaseline(meta);
     }
 
     /// <summary>
@@ -209,23 +223,33 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
 
         Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
 
-        // Suppress local watcher events for this specific file during the write so
-        // hydration is never seen as a user-initiated change/delete (which would
-        // otherwise queue destructive remote operations).
+        // The file stays sparse while it downloads, so an interrupted download is
+        // still recognised as a placeholder and never mistaken for a user edit.
         _suppressor.Suppress(localPath);
+        bool complete = false;
         try
         {
-            // Write directly to the target file (truncate-and-write, no delete + move).
-            // FileMode.Create truncates if exists, no separate File.Delete needed -
-            // so the watcher never sees a Deleted event for the placeholder.
             for (int attempt = 0; attempt < 10; attempt++)
             {
                 try
                 {
                     using (var ws = new FileStream(localPath, FileMode.Create, System.IO.FileAccess.Write, FileShare.Read))
-                    using (var rs = await resp.Content.ReadAsStreamAsync(ct))
                     {
-                        await rs.CopyToAsync(ws, 64 * 1024, ct);
+                        PlaceholderManager.SetSparse(ws.SafeFileHandle, true);
+                        using (var rs = await resp.Content.ReadAsStreamAsync(ct))
+                            await rs.CopyToAsync(ws, 64 * 1024, ct);
+                        ws.Flush(true);
+
+                        if (item.Size > 0 && ws.Length != item.Size)
+                        {
+                            _logger.Warning(
+                                "Hydration size mismatch for {Drive}:{Path}: expected {Expected} bytes, got {Actual}; discarding partial download",
+                                drive.Letter, item.RelativePath, item.Size, ws.Length);
+                            ws.SetLength(0);
+                            try { SyncStateMarker.Mark(localPath, SyncOverlayState.Error); } catch { }
+                            return false;
+                        }
+                        PlaceholderManager.SetSparse(ws.SafeFileHandle, false);
                     }
                     break;
                 }
@@ -235,36 +259,13 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
                 }
             }
 
-            // Verify the bytes we wrote match what metadata claimed. A network
-            // drop or truncated transfer would otherwise silently leave the
-            // file marked as fully hydrated but holding incomplete content,
-            // which the user reads as silent data corruption.
-            if (item.Size > 0)
-            {
-                long actualSize;
-                try { actualSize = new FileInfo(localPath).Length; }
-                catch (Exception ex)
-                {
-                    _logger.Warning(ex, "Hydration size check failed (could not stat) for {Path}", localPath);
-                    return false;
-                }
-                if (actualSize != item.Size)
-                {
-                    _logger.Warning(
-                        "Hydration size mismatch for {Drive}:{Path}: expected {Expected} bytes, got {Actual} — discarding partial download",
-                        drive.Letter, item.RelativePath, item.Size, actualSize);
-                    try { File.Delete(localPath); } catch { /* best effort */ }
-                    try { SyncStateMarker.Mark(localPath, SyncOverlayState.Error); } catch { }
-                    return false;
-                }
-            }
-
             if (item.LastModifiedDateTime != default)
-                File.SetLastWriteTime(localPath, item.LastModifiedDateTime);
+                File.SetLastWriteTimeUtc(localPath, item.LastModifiedDateTime);
             if (item.CreatedDateTime != default)
-                File.SetCreationTime(localPath, item.CreatedDateTime);
+                File.SetCreationTimeUtc(localPath, item.CreatedDateTime);
 
-            _metadata.MarkHydrated(drive.ConfigId, item.RelativePath, hydratedETag);
+            _metadata.MarkHydrated(drive.ConfigId, item.RelativePath, hydratedETag, new FileInfo(localPath));
+            complete = true;
             SyncStateMarker.Mark(localPath, SyncOverlayState.Synced);
             _logger.Information("Hydration complete: {Drive}:{Path} (eTag {ETag})",
                 drive.Letter, item.RelativePath, hydratedETag ?? "(none)");
@@ -277,10 +278,23 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         }
         finally
         {
-            // Keep events suppressed for a few more seconds while the watcher
-            // drains any debounced Changed events from the write.
-            _ = Task.Delay(TimeSpan.FromSeconds(5), CancellationToken.None)
-                .ContinueWith(_ => _suppressor.Release(localPath));
+            if (!complete) ResetToPlaceholder(localPath);
+            _suppressor.Release(localPath);
+        }
+    }
+
+    private void ResetToPlaceholder(string localPath)
+    {
+        try
+        {
+            if (!File.Exists(localPath)) return;
+            using var fs = new FileStream(localPath, FileMode.Open, System.IO.FileAccess.Write, FileShare.ReadWrite);
+            PlaceholderManager.SetSparse(fs.SafeFileHandle, true);
+            fs.SetLength(0);
+        }
+        catch (Exception ex)
+        {
+            _logger.Debug(ex, "Could not reset {Path} after a failed download", localPath);
         }
     }
 
@@ -461,25 +475,11 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
             "Self-heal: {Drive}:{Path} has {Disk} local entries but metadata expects {Meta} — materialising missing placeholders from metadata (no Graph call)",
             drive.Letter, folderRelativePath, diskCount, children.Count);
 
-        _suppressor.Suppress(drive.LocalRootPath);
         int created = 0;
-        try
+        foreach (var child in children.OrderByDescending(c => c.IsFolder))
         {
-            // Folders first so children can be created under them next.
-            foreach (var child in children.Where(c => c.IsFolder))
-            {
-                try { _placeholders.CreateOrUpdate(drive, child); created++; }
-                catch (Exception ex) { _logger.Debug(ex, "Materialise (folder) failed for {Path}", child.RelativePath); }
-            }
-            foreach (var child in children.Where(c => !c.IsFolder))
-            {
-                try { _placeholders.CreateOrUpdate(drive, child); created++; }
-                catch (Exception ex) { _logger.Debug(ex, "Materialise (file) failed for {Path}", child.RelativePath); }
-            }
-        }
-        finally
-        {
-            _suppressor.Release(drive.LocalRootPath);
+            try { _placeholders.CreateOrUpdate(drive, child); created++; }
+            catch (Exception ex) { _logger.Debug(ex, "Materialise failed for {Path}", child.RelativePath); }
         }
 
         _logger.Information("Self-heal complete: {Drive}:{Path} materialised {Count} placeholders",
@@ -534,8 +534,9 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         int created = 0;
         bool succeeded = false;
         var newCount = Interlocked.Increment(ref _activeEnumerations);
-        try { ActiveEnumerationsChanged?.Invoke(newCount); } catch { /* tray listener — never let it crash a Graph call */ }
-        _suppressor.Suppress(drive.LocalRootPath);
+        try { ActiveEnumerationsChanged?.Invoke(newCount); } catch { }
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var listedAt = DateTime.UtcNow;
         try
         {
             while (!string.IsNullOrEmpty(url))
@@ -574,11 +575,11 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
                 {
                     foreach (var item in arr.EnumerateArray())
                     {
-                        var parsed = ParseGraphItem(drive, folderRelativePath, item);
+                        var parsed = GraphItem.Parse(drive, item, folderRelativePath);
                         if (parsed == null) continue;
 
-                        _metadata.Upsert(parsed);
-                        _placeholders.CreateOrUpdate(drive, parsed);
+                        seen.Add(parsed.Name);
+                        _placeholders.ApplyRemote(drive, parsed);
                         created++;
                     }
                 }
@@ -591,8 +592,6 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         }
         finally
         {
-            _ = Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None)
-                .ContinueWith(_ => _suppressor.Release(drive.LocalRootPath));
             var afterCount = Interlocked.Decrement(ref _activeEnumerations);
             try { ActiveEnumerationsChanged?.Invoke(afterCount); } catch { /* see above */ }
         }
@@ -601,9 +600,10 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         // A 404 already wrote its own (negative) record above; clobbering it
         // with "success" would defeat the negative-cache and re-storm Graph on
         // the next walk through this subtree.
-        if (succeeded)
+        if (succeeded && string.IsNullOrEmpty(url))
         {
             _metadata.RecordEnumerationSuccess(drive.ConfigId, folderRelativePath);
+            RemoveGoneChildren(drive, folderRelativePath, seen, listedAt);
         }
 
         if (created > 0)
@@ -613,58 +613,27 @@ internal sealed class HydrationService : IHydrationTrigger, IDisposable
         return created > 0;
     }
 
-    private RemoteItem? ParseGraphItem(DriveConfig drive, string parentRelativePath, System.Text.Json.JsonElement item)
+    /// <summary>
+    /// After a complete listing of a folder, drops the records and placeholders of
+    /// children the cloud no longer has (deleted while we weren't watching).
+    /// Anything with local edits is left for the reconcile pass to upload.
+    /// </summary>
+    private void RemoveGoneChildren(DriveConfig drive, string folderRelativePath, HashSet<string> seen, DateTime listedAt)
     {
-        var name = item.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-        if (string.IsNullOrEmpty(name)) return null;
-        if (name.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase)) return null;
-
-        var remoteId = item.TryGetProperty("id", out var idProp) ? idProp.GetString() ?? "" : "";
-        var isFolder = item.TryGetProperty("folder", out _);
-        long size = item.TryGetProperty("size", out var sz) ? sz.GetInt64() : 0;
-
-        DateTime createdDt = default, modifiedDt = default;
-        if (item.TryGetProperty("createdDateTime", out var cdt))
-            DateTime.TryParse(cdt.GetString(), out createdDt);
-        if (item.TryGetProperty("lastModifiedDateTime", out var mdt))
-            DateTime.TryParse(mdt.GetString(), out modifiedDt);
-
-        string? etag = item.TryGetProperty("eTag", out var et) ? et.GetString() : null;
-
-        string? hash = null;
-        if (item.TryGetProperty("file", out var fileNode) &&
-            fileNode.TryGetProperty("hashes", out var hashes))
+        try
         {
-            if (hashes.TryGetProperty("quickXorHash", out var qxh))
-                hash = qxh.GetString();
-            else if (hashes.TryGetProperty("sha256Hash", out var sha))
-                hash = sha.GetString();
+            foreach (var child in _metadata.GetDirectChildrenByPath(drive.ConfigId, folderRelativePath))
+            {
+                if (seen.Contains(child.Name)) continue;
+                if (string.IsNullOrEmpty(child.RemoteItemId)) continue;
+                if (child.LastSyncedAt > listedAt) continue;
+                _placeholders.RemovePlaceholder(drive, child.RelativePath, child.IsFolder);
+            }
         }
-
-        string parentRemoteId = "";
-        if (item.TryGetProperty("parentReference", out var p2) &&
-            p2.TryGetProperty("id", out var pid))
-            parentRemoteId = pid.GetString() ?? "";
-
-        string? webUrl = item.TryGetProperty("webUrl", out var wu) ? wu.GetString() : null;
-
-        var rel = parentRelativePath.TrimEnd('/') + "/" + name;
-
-        return new RemoteItem
+        catch (Exception ex)
         {
-            DriveConfigId = drive.ConfigId,
-            RemoteItemId = remoteId,
-            ParentRemoteItemId = parentRemoteId,
-            RelativePath = rel,
-            Name = name,
-            IsFolder = isFolder,
-            Size = size,
-            CreatedDateTime = createdDt,
-            LastModifiedDateTime = modifiedDt,
-            ETag = etag,
-            ContentHash = hash,
-            WebUrl = webUrl,
-        };
+            _logger.Debug(ex, "Could not tidy removed children of {Path}", folderRelativePath);
+        }
     }
 
     /// <summary>Drop the in-memory enumeration dedup for a single drive. Used by

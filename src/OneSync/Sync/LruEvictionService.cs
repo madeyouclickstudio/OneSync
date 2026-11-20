@@ -228,13 +228,11 @@ internal sealed class LruEvictionService : IAsyncDisposable
             return false;
         }
 
-        // Safety check 3: size sanity. If the local file is smaller than the
-        // recorded remote Size, the file is in some inconsistent state — DO
-        // NOT touch it. The next sync cycle will reconcile.
-        if (fi.Length < item.Size)
+        // Never evict anything the cloud doesn't have: local edits that haven't
+        // been uploaded, or a copy whose cloud version changed underneath it.
+        if (item.RemoteChangedSinceBaseline || LocalState.IsDirty(fi, item) || fi.Length != item.Size)
         {
-            _logger.Debug("Skip {Path}: local size {Local} < remote size {Remote} (inconsistent)",
-                item.RelativePath, fi.Length, item.Size);
+            _logger.Debug("Skip {Path}: local copy differs from the cloud", item.RelativePath);
             return false;
         }
 
@@ -254,24 +252,23 @@ internal sealed class LruEvictionService : IAsyncDisposable
                 // Truncate to 0.
                 fs.SetLength(0);
                 // Mark as sparse so the directory entry stays cheap.
-                MarkSparse(fs.SafeFileHandle.DangerousGetHandle());
+                PlaceholderManager.SetSparse(fs.SafeFileHandle, true);
             }
 
             // Preserve timestamps so the file's modified date doesn't suddenly jump.
             try
             {
                 if (item.LastModifiedDateTime != default)
-                    File.SetLastWriteTime(localPath, item.LastModifiedDateTime);
+                    File.SetLastWriteTimeUtc(localPath, item.LastModifiedDateTime);
                 if (item.CreatedDateTime != default)
-                    File.SetCreationTime(localPath, item.CreatedDateTime);
+                    File.SetCreationTimeUtc(localPath, item.CreatedDateTime);
             }
             catch { /* timestamps are nice-to-have */ }
 
             // Update overlay icon: this file is now cloud-only.
             try { SyncStateMarker.Mark(localPath, SyncOverlayState.CloudOnly); } catch { }
 
-            // Flip the metadata flag. CRITICAL: this is the ONLY metadata mutation —
-            // it does NOT enqueue any remote operation.
+            // Metadata only; nothing is sent to the cloud.
             _metadata.MarkDehydrated(drive.ConfigId, item.RelativePath);
 
             freedBytes = preSize;
@@ -335,26 +332,6 @@ internal sealed class LruEvictionService : IAsyncDisposable
             return long.MaxValue;
         }
     }
-
-    private static void MarkSparse(IntPtr handle)
-    {
-        try
-        {
-            DeviceIoControl(handle, FSCTL_SET_SPARSE, IntPtr.Zero, 0, IntPtr.Zero, 0,
-                out _, IntPtr.Zero);
-        }
-        catch { /* best effort */ }
-    }
-
-    private const uint FSCTL_SET_SPARSE = 0x000900C4;
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DeviceIoControl(
-        IntPtr hDevice, uint dwIoControlCode,
-        IntPtr lpInBuffer, uint nInBufferSize,
-        IntPtr lpOutBuffer, uint nOutBufferSize,
-        out uint lpBytesReturned, IntPtr lpOverlapped);
 
     public async ValueTask DisposeAsync()
     {

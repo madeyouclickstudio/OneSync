@@ -170,9 +170,6 @@ internal sealed class DeltaPoller : IAsyncDisposable
         int created = 0, updated = 0, deleted = 0;
         string? newDeltaLink = null;
 
-        // Suppress local watcher events while we create placeholders
-        _suppressor.Suppress(drive.LocalRootPath);
-
         try
         {
             while (!string.IsNullOrEmpty(url))
@@ -251,12 +248,10 @@ internal sealed class DeltaPoller : IAsyncDisposable
 
             if (isInitial) InitialPollCompleted?.Invoke(drive);
         }
-        finally
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
         {
-            // Brief delay so the watcher's debounce cycle absorbs the placeholder creates,
-            // then re-enable watching.
-            _ = Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None)
-                .ContinueWith(_ => _suppressor.Release(drive.LocalRootPath));
+            _logger.Warning(ex, "Delta poll for {Letter}: stopped part-way; resumes from checkpoint", drive.Letter);
         }
     }
 
@@ -266,119 +261,63 @@ internal sealed class DeltaPoller : IAsyncDisposable
     {
         try
         {
-            var remoteId = item.GetProperty("id").GetString() ?? "";
-            var name = item.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+            var remoteId = item.TryGetProperty("id", out var idProp) ? idProp.GetString() ?? "" : "";
 
-            // Deleted facet
             if (item.TryGetProperty("deleted", out _))
             {
                 var existing = _metadata.GetById(remoteId);
-                if (existing != null)
+                if (existing == null || existing.DriveConfigId != drive.ConfigId)
+                    return (ProcessAction.None, null);
+
+                _metadata.AddDeleted(new DeletedItem
                 {
-                    _metadata.AddDeleted(new DeletedItem
+                    RemoteItemId = existing.RemoteItemId,
+                    DriveConfigId = drive.ConfigId,
+                    DriveLetter = drive.Letter,
+                    RelativePath = existing.RelativePath,
+                    Name = existing.Name,
+                    IsFolder = existing.IsFolder,
+                    Size = existing.Size,
+                    DeletedAtUtc = DateTime.UtcNow,
+                    LastModifiedDateTime = existing.LastModifiedDateTime,
+                });
+
+                // Local edits under a deleted item are kept and sent up again as new files.
+                foreach (var keptPath in _placeholders.RemovePlaceholder(drive, existing.RelativePath, existing.IsFolder))
+                {
+                    _queue.Enqueue(new SyncOperation
                     {
-                        RemoteItemId = existing.RemoteItemId,
+                        Type = SyncOpType.Upload,
                         DriveConfigId = drive.ConfigId,
                         DriveLetter = drive.Letter,
-                        RelativePath = existing.RelativePath,
-                        Name = existing.Name,
-                        IsFolder = existing.IsFolder,
-                        Size = existing.Size,
-                        DeletedAtUtc = DateTime.UtcNow,
-                        LastModifiedDateTime = existing.LastModifiedDateTime,
+                        RelativePath = keptPath,
+                        Priority = drive.Priority,
                     });
-                    _placeholders.RemovePlaceholder(drive, existing.RelativePath, existing.IsFolder);
-                    _metadata.Delete(drive.ConfigId, existing.RelativePath);
-                    return (ProcessAction.Deleted, existing.RelativePath);
                 }
+                return (ProcessAction.Deleted, existing.RelativePath);
+            }
+
+            var parsed = GraphItem.Parse(drive, item);
+            if (parsed == null) return (ProcessAction.None, null);
+
+            // Only follow items we already know, or new ones in folders we're
+            // tracking. Everything else is fetched when the user opens its folder.
+            var known = _metadata.Get(drive.ConfigId, parsed.RelativePath) ??
+                        (string.IsNullOrEmpty(parsed.RemoteItemId) ? null : _metadata.GetById(parsed.RemoteItemId));
+            if (known == null && !_placeholders.IsTrackedFolder(drive, PathUtil.ParentOf(parsed.RelativePath)))
+                return (ProcessAction.None, null);
+
+            if (_queue.HasPendingForPath(drive.ConfigId, parsed.RelativePath) &&
+                _metadata.Get(drive.ConfigId, parsed.RelativePath) is null)
+            {
+                // A local file of the same name is waiting to upload; the upload
+                // works out which copy wins, so leave the local file alone.
                 return (ProcessAction.None, null);
             }
 
-            // Skip the root folder itself
-            if (item.TryGetProperty("root", out _) && name == "")
-                return (ProcessAction.None, null);
-
-            // Build the relative path
-            string parentPath = "/";
-            if (item.TryGetProperty("parentReference", out var parentRef))
-            {
-                if (parentRef.TryGetProperty("path", out var p))
-                {
-                    // p is like "/drive/root:/Documents"
-                    var raw = p.GetString() ?? "";
-                    var rootMarker = "/root:";
-                    var idx = raw.IndexOf(rootMarker);
-                    if (idx >= 0) parentPath = raw[(idx + rootMarker.Length)..];
-                    if (string.IsNullOrEmpty(parentPath)) parentPath = "/";
-                }
-            }
-
-            var rel = parentPath.TrimEnd('/') + "/" + name;
-            rel = PathUtil.NormalizeRelative(rel);
-            // Decode URL-encoded characters in the path (Graph returns escaped)
-            rel = Uri.UnescapeDataString(rel);
-
-            if (rel.Contains("/$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase) ||
-                rel.StartsWith("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase))
-                return (ProcessAction.None, null);
-
-            var isFolder = item.TryGetProperty("folder", out _);
-            long size = 0;
-            if (item.TryGetProperty("size", out var sz)) size = sz.GetInt64();
-
-            DateTime created = default, modified = default;
-            if (item.TryGetProperty("createdDateTime", out var cdt))
-                DateTime.TryParse(cdt.GetString(), out created);
-            if (item.TryGetProperty("lastModifiedDateTime", out var mdt))
-                DateTime.TryParse(mdt.GetString(), out modified);
-
-            string? etag = item.TryGetProperty("eTag", out var et) ? et.GetString() : null;
-
-            string? hash = null;
-            if (item.TryGetProperty("file", out var fileNode) &&
-                fileNode.TryGetProperty("hashes", out var hashes))
-            {
-                if (hashes.TryGetProperty("quickXorHash", out var qxh))
-                    hash = qxh.GetString();
-                else if (hashes.TryGetProperty("sha256Hash", out var sha))
-                    hash = sha.GetString();
-            }
-
-            string parentRemoteId = "";
-            if (item.TryGetProperty("parentReference", out var p2) &&
-                p2.TryGetProperty("id", out var pid))
-                parentRemoteId = pid.GetString() ?? "";
-
-            // webUrl is needed by OfficeLauncher to route Office opens through
-            // `ms-word:ofe|u|<url>` so co-authoring and AutoSave activate.
-            string? webUrl = item.TryGetProperty("webUrl", out var wu) ? wu.GetString() : null;
-
-            var existingItem = _metadata.Get(drive.ConfigId, rel);
-            var isNew = existingItem == null;
-
-            var newItem = new RemoteItem
-            {
-                DriveConfigId = drive.ConfigId,
-                RemoteItemId = remoteId,
-                ParentRemoteItemId = parentRemoteId,
-                RelativePath = rel,
-                Name = name,
-                IsFolder = isFolder,
-                Size = size,
-                CreatedDateTime = created,
-                LastModifiedDateTime = modified,
-                ETag = etag,
-                ContentHash = hash,
-                WebUrl = webUrl,
-                // If etag changed, mark for re-hydration
-                Hydrated = existingItem?.ETag == etag && existingItem?.Hydrated == true,
-            };
-            _metadata.Upsert(newItem);
-
-            // Create or update the placeholder
-            _placeholders.CreateOrUpdate(drive, newItem);
-
-            return (isNew ? ProcessAction.Created : ProcessAction.Updated, rel);
+            var result = _placeholders.ApplyRemote(drive, parsed);
+            return (result == PlaceholderManager.ApplyResult.Created ? ProcessAction.Created : ProcessAction.Updated,
+                parsed.RelativePath);
         }
         catch (Exception ex)
         {
@@ -421,36 +360,5 @@ internal sealed class DeltaPoller : IAsyncDisposable
             try { await _pollTask; } catch { }
         }
         _cts?.Dispose();
-    }
-}
-
-/// <summary>
-/// Shared flag set so that LocalWatcher events fired during delta-driven
-/// placeholder creation are not queued as outbound uploads (which would
-/// erase the remote content with empty placeholders).
-/// </summary>
-internal sealed class LocalChangeSuppressor
-{
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _suppressed = new(StringComparer.OrdinalIgnoreCase);
-
-    public bool IsSuppressed(string fullPath)
-    {
-        foreach (var kvp in _suppressed)
-        {
-            if (kvp.Value > 0 &&
-                fullPath.StartsWith(kvp.Key, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-        return false;
-    }
-
-    public void Suppress(string root)
-    {
-        _suppressed.AddOrUpdate(root, 1, (_, v) => v + 1);
-    }
-
-    public void Release(string root)
-    {
-        _suppressed.AddOrUpdate(root, 0, (_, v) => Math.Max(0, v - 1));
     }
 }
