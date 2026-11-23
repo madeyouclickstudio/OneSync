@@ -9,10 +9,50 @@ using Microsoft.Win32;
 
 namespace OneSync.Widget;
 
-// Light and dark palettes for the widgets. Follows the Windows app theme
-// (Settings > Personalisation > Colours) and switches when it changes.
+internal enum ThemeMode { Auto, Light, Dark }
+
+// Light and dark palettes for the widgets. By default it follows the Windows app
+// theme (Settings > Personalisation > Colours); the tray menu can fix it to
+// light or dark instead. The choice is kept in HKCU\Software\OneSync\Theme.
 internal static class WidgetTheme
 {
+    private const string SettingsKey = @"Software\OneSync";
+    private const string ThemeValue = "Theme";
+
+    private static ThemeMode _mode = ReadMode();
+
+    // Raised on the caller's thread after the mode changes.
+    public static event Action? ModeChanged;
+
+    public static ThemeMode Mode
+    {
+        get => _mode;
+        set
+        {
+            if (_mode == value) return;
+            _mode = value;
+            try
+            {
+                using var key = Registry.CurrentUser.CreateSubKey(SettingsKey);
+                key.SetValue(ThemeValue, value.ToString().ToLowerInvariant());
+            }
+            catch { }
+            ModeChanged?.Invoke();
+        }
+    }
+
+    private static ThemeMode ReadMode()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(SettingsKey);
+            if (key?.GetValue(ThemeValue) is string s && Enum.TryParse(s, true, out ThemeMode m))
+                return m;
+        }
+        catch { }
+        return ThemeMode.Auto;
+    }
+
     private static readonly Dictionary<string, string> Dark = new()
     {
         ["PrimaryText"] = "#FFFFFF",
@@ -61,7 +101,14 @@ internal static class WidgetTheme
     private const string DarkWindow = "#B3202020";
     private const string LightWindow = "#B3F3F3F3";
 
-    public static bool IsLight
+    public static bool IsLight => _mode switch
+    {
+        ThemeMode.Light => true,
+        ThemeMode.Dark => false,
+        _ => WindowsIsLight,
+    };
+
+    private static bool WindowsIsLight
     {
         get
         {
@@ -75,7 +122,7 @@ internal static class WidgetTheme
         }
     }
 
-    // Applies the current theme now and again whenever Windows changes it.
+    // Applies the current theme now and again whenever it changes.
     // onChanged runs after each switch, for anything the window colours itself.
     public static void Attach(Window window, SolidColorBrush windowBg, Action? onChanged = null)
     {
@@ -94,8 +141,14 @@ internal static class WidgetTheme
             if (e.Category == UserPreferenceCategory.General)
                 window.Dispatcher.BeginInvoke(Apply);
         };
+        Action modeHandler = () => window.Dispatcher.BeginInvoke(Apply);
         SystemEvents.UserPreferenceChanged += handler;
-        window.Closed += (_, _) => SystemEvents.UserPreferenceChanged -= handler;
+        ModeChanged += modeHandler;
+        window.Closed += (_, _) =>
+        {
+            SystemEvents.UserPreferenceChanged -= handler;
+            ModeChanged -= modeHandler;
+        };
 
         Apply();
     }

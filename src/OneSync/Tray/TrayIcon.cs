@@ -9,6 +9,7 @@ using OneSync.Diagnostics;
 using OneSync.FileSystem;
 using OneSync.State;
 using OneSync.Sync;
+using OneSync.Widget;
 using Serilog;
 
 namespace OneSync.Tray;
@@ -398,6 +399,24 @@ internal sealed class TrayIcon : IDisposable
             recycleBin.Click += (_, _) => _toggleRecycleBin();
             _menu.Items.Add(recycleBin);
         }
+
+        var themeRoot = new ToolStripMenuItem("Theme");
+        foreach (var (mode, text) in new[]
+        {
+            (ThemeMode.Auto, "Auto (match Windows)"),
+            (ThemeMode.Light, "Light"),
+            (ThemeMode.Dark, "Dark"),
+        })
+        {
+            var m = mode;
+            themeRoot.DropDownItems.Add(new ToolStripMenuItem(text, null, (_, _) =>
+            {
+                WidgetTheme.Mode = m;
+                _menu.BeginInvoke(Refresh);
+            })
+            { Checked = WidgetTheme.Mode == m });
+        }
+        _menu.Items.Add(themeRoot);
 
         _menu.Items.Add(new ToolStripSeparator());
 
