@@ -277,10 +277,11 @@ internal sealed class SyncEngine : IAsyncDisposable
         _hydration = new HydrationService(_graph, _metadata, _placeholders, _drives, _suppressor, config.SyncSettings, logger);
         _conflictResolver = new ConflictResolver(_metadata, _placeholders, _queue, _suppressor, logger);
         _manifest = new PendingManifestService(_graph, logger);
-        _recycleBin = new RecycleBinService(_graph, _metadata, _queue, _drives, _auth.Account?.Username, logger);
+        _recycleBin = new RecycleBinService(_graph, _metadata, _queue, _drives, _auth.Account?.Username, logger,
+            (host, ct) => _auth.GetSharePointTokenAsync(host, ct));
         _delta = new DeltaPoller(_graph, _metadata, _queue, _placeholders, _drives,
             _config.SyncSettings, _suppressor, logger);
-        _recycleBin.SentToWebRecycleBin += (drive, item) =>
+        _recycleBin.RestoringInCloud += (drive, item) =>
             _delta.PollFrequently(drive, item.RelativePath, TimeSpan.FromMinutes(10));
 
         _eviction = new LruEvictionService(_metadata, _queue, _suppressor,

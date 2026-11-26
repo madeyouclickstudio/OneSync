@@ -85,6 +85,37 @@ internal sealed class GraphAuthProvider : IAsyncDisposable
         return result.AccessToken;
     }
 
+    /// <summary>
+    /// A token for SharePoint's own REST API on <paramref name="host"/> (such as
+    /// contoso-my.sharepoint.com), for the few things Graph can't do, like restoring
+    /// from a work or school recycle bin. Needs the delegated SharePoint permission
+    /// AllSites.Write on the app registration, with admin consent. Silent only:
+    /// null when that permission isn't there, and the caller falls back.
+    /// </summary>
+    public async Task<string?> GetSharePointTokenAsync(string host, CancellationToken cancellationToken = default)
+    {
+        if (_pca is null) return null;
+        var scopes = new[] { $"https://{host}/AllSites.Write" };
+        try
+        {
+            var accounts = await _pca.GetAccountsAsync();
+            var account = _account ?? accounts.FirstOrDefault() ?? PublicClientApplication.OperatingSystemAccount;
+            var result = await _pca.AcquireTokenSilent(scopes, account).ExecuteAsync(cancellationToken);
+            return result.AccessToken;
+        }
+        catch (MsalException ex)
+        {
+            _logger.Information("No SharePoint token for {Host} ({Code}); is AllSites.Write granted to the app?",
+                host, ex.ErrorCode);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "SharePoint token for {Host} failed", host);
+            return null;
+        }
+    }
+
     private async Task<AuthenticationResult> AcquireTokenAsync(CancellationToken cancellationToken)
     {
         if (_pca is null) throw new InvalidOperationException("Auth not initialised");

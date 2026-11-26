@@ -27,9 +27,12 @@ internal sealed class RecycleBinService
 
     public event Action<DeletedItem>? ItemRestored;
 
-    /// <summary>The user was sent to the web recycle bin to restore this item, as
-    /// Graph can't restore from a work or school recycle bin.</summary>
-    public event Action<DriveConfig, DeletedItem>? SentToWebRecycleBin;
+    /// <summary>The item is being restored in the cloud (by us, or by the user on
+    /// the web recycle bin page): watch for it coming back.</summary>
+    public event Action<DriveConfig, DeletedItem>? RestoringInCloud;
+
+    private readonly Func<string, CancellationToken, Task<string?>>? _sharePointToken;
+    private static readonly HttpClient s_sharePoint = new() { Timeout = TimeSpan.FromSeconds(30) };
 
     public RecycleBinService(
         GraphHttpClient graph,
@@ -37,8 +40,10 @@ internal sealed class RecycleBinService
         SyncQueue queue,
         IEnumerable<DriveConfig> drives,
         string? userPrincipalName,
-        ILogger logger)
+        ILogger logger,
+        Func<string, CancellationToken, Task<string?>>? sharePointToken = null)
     {
+        _sharePointToken = sharePointToken;
         _graph = graph;
         _metadata = metadata;
         _queue = queue;
@@ -73,7 +78,13 @@ internal sealed class RecycleBinService
                 cancelled, item.DriveLetter, item.RelativePath);
 
         if (item.IsFolder)
+        {
+            // Gone from the cloud: bring it back from the cloud recycle bin with its
+            // contents. Making the folder here would only upload an empty one.
+            if (cancelled == 0 && await IsGoneFromCloudAsync(drive, item, ct))
+                return await RestoreFromCloudBinAsync(drive, item, ct);
             return RestoreFolder(drive, item);
+        }
 
         return await RestoreFileAsync(drive, item, ct);
     }
@@ -96,14 +107,7 @@ internal sealed class RecycleBinService
                 ct, HttpCompletionOption.ResponseHeadersRead);
 
             if ((int)dlResp.StatusCode == 404)
-            {
-                _logger.Information("File in server recycle bin, opening web UI: {Drive}:{Path}",
-                    item.DriveLetter, item.RelativePath);
-                await OpenWebRecycleBinAsync(drive, ct);
-                _metadata.RemoveDeleted(item.Key);
-                try { SentToWebRecycleBin?.Invoke(drive, item); } catch { }
-                return (true, null);
-            }
+                return await RestoreFromCloudBinAsync(drive, item, ct);
 
             if (!dlResp.IsSuccessStatusCode)
             {
@@ -161,6 +165,145 @@ internal sealed class RecycleBinService
         _logger.Information("Restored folder: {Drive}:{Path}", item.DriveLetter, item.RelativePath);
         ItemRestored?.Invoke(item);
         return (true, null);
+    }
+
+    private static string ItemUrl(DriveConfig drive, string remoteItemId) => drive.IsOneDrive
+        ? $"https://graph.microsoft.com/v1.0/me/drive/items/{remoteItemId}?$select=id"
+        : $"https://graph.microsoft.com/v1.0/drives/{drive.ResolvedDriveId}/items/{remoteItemId}?$select=id";
+
+    private async Task<bool> IsGoneFromCloudAsync(DriveConfig drive, DeletedItem item, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await _graph.SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, ItemUrl(drive, item.RemoteItemId)), ct);
+            return resp.StatusCode == System.Net.HttpStatusCode.NotFound;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// The item is in the cloud recycle bin. Graph can only restore from a personal
+    /// OneDrive's bin, so this uses SharePoint's REST API; without the permission
+    /// for that, the web recycle bin opens for the user to restore it there. Either
+    /// way the drive is then watched closely until the item is back.
+    /// </summary>
+    private async Task<(bool Success, string? Error)> RestoreFromCloudBinAsync(
+        DriveConfig drive, DeletedItem item, CancellationToken ct)
+    {
+        bool restored = false;
+        try { restored = await TryRestoreWithSharePointAsync(drive, item, ct); }
+        catch (Exception ex) { _logger.Warning(ex, "Restore from the cloud recycle bin failed for {Path}", item.RelativePath); }
+
+        if (!restored)
+        {
+            _logger.Information("In the cloud recycle bin, opening the web page: {Drive}:{Path}",
+                item.DriveLetter, item.RelativePath);
+            await OpenWebRecycleBinAsync(drive, ct);
+        }
+        _metadata.RemoveDeleted(item.Key);
+        try { RestoringInCloud?.Invoke(drive, item); } catch { }
+        return (true, null);
+    }
+
+    /// <summary>
+    /// Finds the item in the site's recycle bin and restores it. A file deleted
+    /// along with its folder is only in the bin as part of that folder, so failing
+    /// an entry for the item itself, the nearest deleted folder above it is restored.
+    /// </summary>
+    private async Task<bool> TryRestoreWithSharePointAsync(DriveConfig drive, DeletedItem item, CancellationToken ct)
+    {
+        if (_sharePointToken is null) return false;
+        var (web, library) = await GetWebAndLibraryAsync(drive, ct);
+        if (web is null || library is null) return false;
+
+        var token = await _sharePointToken(new Uri(web).Host, ct);
+        if (token is null) return false;
+
+        var parts = item.RelativePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (int n = parts.Length; n >= 1; n--)
+        {
+            var leaf = parts[n - 1];
+            var dir = library + (n > 1 ? "/" + string.Join("/", parts.Take(n - 1)) : "");
+            var id = await FindInRecycleBinAsync(web, token, leaf, dir, ct);
+            if (id is null) continue;
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{web}/_api/web/RecycleBin('{id}')/restore()");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            req.Headers.Accept.ParseAdd("application/json;odata=nometadata");
+            using var resp = await s_sharePoint.SendAsync(req, ct);
+            if (resp.IsSuccessStatusCode)
+            {
+                _logger.Information("Restored from the cloud recycle bin: {Drive}:/{Path}{Note}", item.DriveLetter,
+                    string.Join("/", parts.Take(n)),
+                    n < parts.Length ? " (the folder it was deleted with)" : "");
+                return true;
+            }
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            _logger.Warning("Cloud recycle bin restore of {Leaf} failed {Status}: {Body}",
+                leaf, (int)resp.StatusCode, Truncate(body, 300));
+            return false;
+        }
+        _logger.Information("{Path} not found in the cloud recycle bin", item.RelativePath);
+        return false;
+    }
+
+    /// <summary>Id of the newest recycle bin entry named <paramref name="leaf"/> that was in
+    /// <paramref name="dir"/> (server-relative, no leading slash), or null.</summary>
+    private static async Task<string?> FindInRecycleBinAsync(string web, string token, string leaf, string dir,
+        CancellationToken ct)
+    {
+        var filter = Uri.EscapeDataString($"LeafName eq '{leaf.Replace("'", "''")}'");
+        using var req = new HttpRequestMessage(HttpMethod.Get,
+            $"{web}/_api/web/RecycleBin?$filter={filter}&$select=Id,LeafName,DirName,DeletedDate");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        req.Headers.Accept.ParseAdd("application/json;odata=nometadata");
+        using var resp = await s_sharePoint.SendAsync(req, ct);
+        if (!resp.IsSuccessStatusCode) return null;
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        if (!doc.RootElement.TryGetProperty("value", out var value)) return null;
+        string? best = null;
+        DateTime bestAt = DateTime.MinValue;
+        foreach (var e in value.EnumerateArray())
+        {
+            var dirName = e.TryGetProperty("DirName", out var d) ? d.GetString()?.Trim('/') : null;
+            if (!string.Equals(dirName, dir.Trim('/'), StringComparison.OrdinalIgnoreCase)) continue;
+            var at = e.TryGetProperty("DeletedDate", out var t) && t.TryGetDateTime(out var dt) ? dt : DateTime.MinValue;
+            if (best is null || at > bestAt)
+            {
+                best = e.GetProperty("Id").GetString();
+                bestAt = at;
+            }
+        }
+        return best;
+    }
+
+    /// <summary>The site (web) URL and the library's server-relative path for a drive.</summary>
+    private async Task<(string? Web, string? Library)> GetWebAndLibraryAsync(DriveConfig drive, CancellationToken ct)
+    {
+        string? libraryUrl;
+        string? web;
+        if (drive.IsOneDrive)
+        {
+            using var resp = await _graph.SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, "https://graph.microsoft.com/v1.0/me/drive?$select=webUrl"), ct);
+            if (!resp.IsSuccessStatusCode) return (null, null);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            libraryUrl = doc.RootElement.TryGetProperty("webUrl", out var w) ? w.GetString() : null;
+            if (string.IsNullOrEmpty(libraryUrl)) return (null, null);
+            var trimmed = libraryUrl.TrimEnd('/');
+            web = trimmed[..trimmed.LastIndexOf('/')];
+        }
+        else
+        {
+            if (string.IsNullOrEmpty(drive.SiteUrl)) return (null, null);
+            web = drive.SiteUrl.TrimEnd('/');
+            libraryUrl = drive.ResolvedLibraryWebUrl;
+            if (string.IsNullOrEmpty(libraryUrl)) return (null, null);
+        }
+        var library = Uri.UnescapeDataString(new Uri(libraryUrl).AbsolutePath).Trim('/');
+        return (web, library);
     }
 
     private async Task OpenWebRecycleBinAsync(DriveConfig drive, CancellationToken ct)
