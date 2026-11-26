@@ -203,6 +203,9 @@ Left nav → **API permissions**:
   - `offline_access` (under "OpenId permissions")
   - `User.Read` (under "User")
 - Click **Add permissions**
+- Optional, for restoring from the cloud recycle bin straight from the Recycle Bin widget (1.6.0 and later):
+  click **+ Add a permission** again, pick **SharePoint**, then **Delegated permissions**, and tick
+  `AllSites.Write`. Without it, the widget opens the web recycle bin page instead.
 
 ### 5. Grant admin consent
 
