@@ -51,6 +51,9 @@ admin centre → App registrations**:
    - `Sites.ReadWrite.All` — read/write SharePoint document libraries
    - `offline_access` — refresh tokens for silent SSO
    - `User.Read` — basic profile
+   - Optional, under **SharePoint** (not Microsoft Graph): `AllSites.Write` — lets the Recycle Bin
+     widget restore from the cloud recycle bin itself (1.6.0 and later). Without it the widget opens
+     the web recycle bin page instead.
 4. Grant admin consent for those permissions.
 5. Copy the **Tenant ID** and **Application (client) ID** into `config.json`.
 

@@ -84,7 +84,7 @@ Minimum viable config (about 15 lines, the shape the wizard produces):
 }
 ```
 
-The Entra app registration needs delegated permissions: `Files.ReadWrite`, `Sites.ReadWrite.All`, `offline_access`, `User.Read`, and must allow public client flows.
+The Entra app registration needs delegated permissions: `Files.ReadWrite`, `Sites.ReadWrite.All`, `offline_access`, `User.Read`, and must allow public client flows. Optionally add SharePoint > Delegated > `AllSites.Write` (with admin consent) so the Recycle Bin widget can restore from the cloud recycle bin itself (1.6.0+); without it the widget opens the web recycle bin page.
 
 **No client secret required.** OneSync runs as a public client (desktop app) using MSAL's WAM broker — the signed-in Windows user authenticates with their own delegated permissions, so there's no shared application secret to distribute to endpoints, store in config, or rotate. Don't create a client secret on the app registration; OneSync won't use it. Full setup steps in [DEPLOYMENT.md](DEPLOYMENT.md#tenant-prep-checklist).
 
