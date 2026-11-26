@@ -47,6 +47,8 @@ public partial class SyncStatusWidget : Window
                 UpdateSpin();
             else if (e.PropertyName == nameof(SyncStatusViewModel.IsVisible))
                 UpdateVisibility();
+            else if (e.PropertyName == nameof(SyncStatusViewModel.State) && _vm.State == WidgetState.Idle)
+                ReleaseHeight();
         };
     }
 
@@ -126,6 +128,8 @@ public partial class SyncStatusWidget : Window
     // The window sits on the bottom edge, so every size change moves its top.
     // It grows straight away but only shrinks once the list has been settled
     // for a moment, so rows coming and going during a sync don't make it jump.
+    // Once everything has synced there's nothing more to come, so it shrinks
+    // to "All synced" at once.
     private readonly DispatcherTimer _shrinkTimer = new() { Interval = TimeSpan.FromSeconds(2) };
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -138,6 +142,11 @@ public partial class SyncStatusWidget : Window
     private void Body_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (!e.HeightChanged || e.NewSize.Height >= e.PreviousSize.Height) return;
+        if (_vm.State == WidgetState.Idle)
+        {
+            ReleaseHeight();
+            return;
+        }
         _shrinkTimer.Stop();
         _shrinkTimer.Start();
     }
