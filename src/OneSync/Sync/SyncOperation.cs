@@ -61,6 +61,11 @@ internal sealed class SyncOperation
     /// that upload left no record, there is nothing of ours to delete.</summary>
     public bool FollowsUpload { get; set; }
 
+    /// <summary>An upload of a file deleted here and put back before the delete went
+    /// out. It replaces the cloud file it would have deleted (<see cref="RemoteItemId"/>,
+    /// if still at <see cref="ETag"/>), so that file keeps its id and URL.</summary>
+    public bool ReplacesDeleted { get; set; }
+
     public long FileSizeBytes { get; set; }
     public string? ContentHash { get; set; }
 

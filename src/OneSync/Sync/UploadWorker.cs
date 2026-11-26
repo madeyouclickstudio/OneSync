@@ -276,6 +276,16 @@ internal sealed class UploadWorker
         try { remote = await GetRemoteItemAsync(drive, op.RelativePath, ct); }
         catch (Exception ex) { _logger.Debug(ex, "Could not fetch cloud copy of {Path}", op.RelativePath); }
 
+        if (op.ReplacesDeleted && remote is null)
+        {
+            // It was to replace a cloud file that has gone since: send it as a new file.
+            _logger.Information("Cloud copy of {Path} is gone; uploading it as a new file", op.RelativePath);
+            op.ReplacesDeleted = false;
+            op.ETag = null;
+            _queue.MarkRetry(op, TimeSpan.Zero, "cloud copy gone; uploading as new");
+            return;
+        }
+
         if (await _conflictResolver.ResolveAsync(drive, op, remote))
             _queue.MarkCompleted(op);
         else
@@ -361,6 +371,18 @@ internal sealed class UploadWorker
         else if (meta != null && !LocalState.IsDirty(fi, meta))
         {
             _logger.Debug("Unchanged since last sync: {Path}", op.RelativePath);
+            return;
+        }
+
+        if (meta is null && op.ReplacesDeleted && !string.IsNullOrEmpty(op.ETag))
+        {
+            // Deleted here and put back before the delete went out: replace the
+            // cloud file in place, so it keeps its id and URL (see SyncQueue.Enqueue).
+            _logger.Information("{Path} is back before its delete was sent; replacing the cloud copy", op.RelativePath);
+            await SendFileAsync(op, drive, localPath, fi, op.ETag, ct);
+            if (!string.IsNullOrEmpty(op.RemoteItemId) &&
+                _metadata.Get(op.DriveConfigId, op.RelativePath)?.RemoteItemId == op.RemoteItemId)
+                _metadata.RemoveDeleted(DeletedItem.MakeKey(op.DriveConfigId, op.RemoteItemId));
             return;
         }
 
@@ -616,7 +638,8 @@ internal sealed class UploadWorker
     {
         if (resp.IsSuccessStatusCode) return;
 
-        if (resp.StatusCode == HttpStatusCode.PreconditionFailed)
+        if (resp.StatusCode == HttpStatusCode.PreconditionFailed ||
+            (resp.StatusCode == HttpStatusCode.NotFound && op.ReplacesDeleted))
             throw new RemoteConflictException(op.RelativePath, ifMatchETag);
 
         var body = await resp.Content.ReadAsStringAsync(ct);

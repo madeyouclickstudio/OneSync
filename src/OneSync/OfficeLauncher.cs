@@ -61,7 +61,7 @@ internal static class OfficeLauncher
             // folders under %LOCALAPPDATA%\OneSync\Drives\... - but file
             // associations get the H:\... / I:\... / J:\... drive-letter
             // form. We normalise both ways.
-            var (drive, relativePath) = ResolveToConfiguredDrive(filePath, logger);
+            var (drive, relativePath, localPath) = ResolveToConfiguredDrive(filePath, logger);
             if (drive == null)
             {
                 logger.Information("Path not in a OneSync drive; opening locally");
@@ -74,7 +74,7 @@ internal static class OfficeLauncher
             OneSync.State.DriveResolutionStore.Hydrate(drive);
 
             // Look up the webUrl in MetadataStore (shared mode read).
-            string? webUrl = TryLookupWebUrl(drive, relativePath, logger);
+            string? webUrl = TryLookupWebUrl(drive, relativePath, localPath, logger, out var itemId);
 
             if (string.IsNullOrEmpty(webUrl))
             {
@@ -108,6 +108,9 @@ internal static class OfficeLauncher
             var directUrl = BuildDirectSharePointUrl(drive, relativePath, webUrl, logger) ?? webUrl;
 
             logger.Information("Direct URL: {Url}", directUrl);
+
+            if (!string.IsNullOrEmpty(itemId) && UrlNowHoldsOtherItem(directUrl, itemId, logger))
+                return OpenLocally(filePath);
 
             // ms-word:ofe|u|<url> - "ofe" = "open for editing"
             var protocolUrl = $"{scheme}:ofe|u|{directUrl}";
@@ -210,7 +213,7 @@ internal static class OfficeLauncher
     /// (H:\Documents\foo.docx) and the local NTFS form
     /// (C:\Users\&lt;u&gt;\AppData\Local\OneSync\Drives\Home_Folder\Documents\foo.docx).
     /// </summary>
-    private static (DriveConfig?, string) ResolveToConfiguredDrive(string filePath, ILogger logger)
+    private static (DriveConfig?, string, string) ResolveToConfiguredDrive(string filePath, ILogger logger)
     {
         AppConfig config;
         try
@@ -220,39 +223,147 @@ internal static class OfficeLauncher
         catch (Exception ex)
         {
             logger.Warning(ex, "Could not load config - falling back");
-            return (null, "");
+            return (null, "", "");
         }
 
         // For each configured drive, also expand its LocalRootPath the way
         // OneSync does at runtime so we can match the C:\... form too.
         foreach (var drive in config.Drives)
         {
-            // Drive-letter prefix: "H:\"
-            var letterPrefix = drive.Letter.ToUpperInvariant() + ":\\";
-            if (filePath.StartsWith(letterPrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                var rest = filePath.Substring(letterPrefix.Length);
-                return (drive, "/" + rest.Replace('\\', '/'));
-            }
-
             // Local NTFS form: %LOCALAPPDATA%\OneSync\Drives\<DriveFolderName>
             // OneSync's runtime sets this to "<localStorageRoot>\<Label with spaces -> underscores>"
             var driveFolder = drive.Label.Replace(' ', '_');
             var localRoot = Path.Combine(
                 PathUtil.Expand(config.LocalStorageRoot ?? @"%LOCALAPPDATA%\OneSync\Drives"),
                 driveFolder).TrimEnd('\\');
+
+            // Drive-letter prefix: "H:\"
+            var letterPrefix = drive.Letter.ToUpperInvariant() + ":\\";
+            if (filePath.StartsWith(letterPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var rest = filePath.Substring(letterPrefix.Length);
+                return (drive, "/" + rest.Replace('\\', '/'), Path.Combine(localRoot, rest));
+            }
+
             if (filePath.StartsWith(localRoot + "\\", StringComparison.OrdinalIgnoreCase))
             {
                 var rest = filePath.Substring(localRoot.Length + 1);
-                return (drive, "/" + rest.Replace('\\', '/'));
+                return (drive, "/" + rest.Replace('\\', '/'), filePath);
             }
         }
 
-        return (null, "");
+        return (null, "", "");
     }
 
-    private static string? TryLookupWebUrl(DriveConfig drive, string relativePath, ILogger logger)
+    /// <summary>
+    /// Word keeps what it knows about a cloud document under its URL: an open
+    /// window, or its cached copy (kept 14 days by default). When a file is deleted
+    /// and a new one put at the same path (the same download sent again, a folder
+    /// cleared out and refilled), the URL stays but the cloud item is new, and Word
+    /// shows its copy of the old item under "a newer version is on the server".
+    /// So we remember which item we last sent Word to at each URL; while that is
+    /// recent, a different item at that URL opens from the local copy instead,
+    /// which always has the latest content.
+    /// </summary>
+    private static bool UrlNowHoldsOtherItem(string url, string itemId, ILogger logger)
     {
+        var window = TimeSpan.FromDays(14);
+        var stateDir = PathUtil.Expand(@"%LOCALAPPDATA%\OneSync");
+        var path = Path.Combine(stateDir, "office-launch-history.json");
+        var launches = new System.Collections.Generic.Dictionary<string, LaunchRecord>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (File.Exists(path))
+            {
+                var read = System.Text.Json.JsonSerializer.Deserialize<
+                    System.Collections.Generic.Dictionary<string, LaunchRecord>>(File.ReadAllText(path));
+                if (read != null)
+                    foreach (var (k, v) in read) launches[k] = v;
+            }
+            else
+            {
+                // First run: rebuild from this launcher's own logs, so documents Word
+                // already holds an old copy of are caught too.
+                SeedFromLauncherLogs(Path.Combine(stateDir, "Logs"), launches, logger);
+                try { File.Delete(Path.Combine(stateDir, "office-launches.json")); } catch { }
+            }
+        }
+        catch (Exception ex) { logger.Warning(ex, "Could not read {Path}; starting afresh", path); }
+
+        foreach (var k in launches.Where(kv => DateTime.UtcNow - kv.Value.At >= window).Select(kv => kv.Key).ToList())
+            launches.Remove(k);
+
+        bool other = Record(launches, url, itemId, DateTime.UtcNow, out var last);
+        if (other)
+            logger.Information("{Url} now holds a different item ({New}) from the one Word was given on {At:u} ({Old}); opening the local copy",
+                url, itemId, last!.At, last.Id);
+
+        try { File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(launches)); }
+        catch (Exception ex) { logger.Warning(ex, "Could not save {Path}", path); }
+        return other;
+    }
+
+    /// <summary>Notes that Word is given <paramref name="itemId"/> at <paramref name="url"/>.
+    /// True if Word was given a different item there before; that record is kept,
+    /// so the URL goes on opening locally until it ages out.</summary>
+    private static bool Record(System.Collections.Generic.Dictionary<string, LaunchRecord> launches,
+        string url, string itemId, DateTime at, out LaunchRecord? last)
+    {
+        if (launches.TryGetValue(url, out last) && !string.Equals(last.Id, itemId, StringComparison.OrdinalIgnoreCase))
+            return true;
+        launches[url] = new LaunchRecord { Id = itemId, At = at };
+        return false;
+    }
+
+    /// <summary>Replays the "Found item" / "Direct URL" pairs in office-launcher*.log.</summary>
+    private static void SeedFromLauncherLogs(string logDir,
+        System.Collections.Generic.Dictionary<string, LaunchRecord> launches, ILogger logger)
+    {
+        if (!Directory.Exists(logDir)) return;
+        var found = new System.Text.RegularExpressions.Regex(@"Found item: ETag=""?\{([0-9A-Fa-f-]{36})\}");
+        var direct = new System.Text.RegularExpressions.Regex(@"Direct URL: (\S+)");
+        foreach (var file in Directory.GetFiles(logDir, "office-launcher*.log").OrderBy(f => f, StringComparer.Ordinal))
+        {
+            try
+            {
+                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(fs);
+                string? id = null;
+                for (var line = reader.ReadLine(); line != null; line = reader.ReadLine())
+                {
+                    var f = found.Match(line);
+                    if (f.Success) { id = f.Groups[1].Value; continue; }
+                    var d = direct.Match(line);
+                    if (d.Success && id != null &&
+                        line.Length >= 30 && DateTimeOffset.TryParse(line[..30], out var at))
+                        Record(launches, d.Groups[1].Value, id, at.UtcDateTime, out _);
+                    if (line.Contains("--launch-office")) id = null;
+                }
+            }
+            catch (Exception ex) { logger.Debug(ex, "Could not read {File}", file); }
+        }
+        logger.Information("Rebuilt {Count} Office launch records from the launcher logs", launches.Count);
+    }
+
+    /// <summary>The SharePoint id in the eTag ("{guid},version"): it is what the
+    /// launcher log records, and it changes when a file is deleted and made again.</summary>
+    private static string? ItemKey(RemoteItem item)
+    {
+        var e = item.ETag;
+        int open = e?.IndexOf('{') ?? -1, close = e?.IndexOf('}') ?? -1;
+        return open >= 0 && close > open ? e![(open + 1)..close] : item.RemoteItemId;
+    }
+
+    private sealed class LaunchRecord
+    {
+        public string Id { get; set; } = "";
+        public DateTime At { get; set; }
+    }
+
+    private static string? TryLookupWebUrl(DriveConfig drive, string relativePath, string localPath, ILogger logger,
+        out string? itemId)
+    {
+        itemId = null;
         try
         {
             var stateDir = PathUtil.Expand(@"%LOCALAPPDATA%\OneSync");
@@ -285,6 +396,7 @@ internal static class OfficeLauncher
                     if (it != null)
                     {
                         logger.Information("HIT via variant '{Variant}': webUrl={WebUrl}", v, it.WebUrl ?? "<null>");
+                        itemId = ItemKey(it);
                         return it.WebUrl;
                     }
                 }
@@ -296,6 +408,17 @@ internal static class OfficeLauncher
 
             logger.Information("Found item: ETag={ETag}, WebUrl={WebUrl}, Size={Size}",
                 item.ETag ?? "<null>", item.WebUrl ?? "<null>", item.Size);
+
+            // The local copy has changed since it last matched the cloud (a fresh
+            // download over an old file, say) and its upload hasn't gone yet: the
+            // cloud copy is out of date, so open this one. Records with no baseline
+            // aren't judged here, as that would mean hashing the file.
+            if (LocalState.HasBaseline(item) && LocalState.IsDirty(new FileInfo(localPath), item))
+            {
+                logger.Information("Local copy has changes not yet uploaded; opening it locally");
+                return null;
+            }
+            itemId = ItemKey(item);
             return item.WebUrl;
         }
         catch (Exception ex)

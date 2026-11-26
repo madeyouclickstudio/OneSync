@@ -75,6 +75,24 @@ internal sealed class SyncQueue : IDisposable
                         _ops.Update(existing);
                         return;
                     }
+
+                    // The file was deleted here and is back under the same name before
+                    // the delete reached the cloud (a fresh download over an old one, an
+                    // app that saves by delete and recreate). Send it as a new version of
+                    // the cloud file it would have deleted, not a delete and a new file:
+                    // a new item at the same URL leaves Word holding the old one, and the
+                    // user sees the old content under "a newer version is on the server".
+                    var delete = waiting.FirstOrDefault(o =>
+                        o.Type == SyncOpType.RemoteDelete && !o.FollowsUpload &&
+                        !string.IsNullOrEmpty(o.ETag) && !string.IsNullOrEmpty(o.RemoteItemId) &&
+                        SamePath(o.RelativePath, op.RelativePath));
+                    if (delete != null)
+                    {
+                        _ops.Delete(delete.Id);
+                        op.ETag = delete.ETag;
+                        op.RemoteItemId = delete.RemoteItemId;
+                        op.ReplacesDeleted = true;
+                    }
                     break;
                 }
                 case SyncOpType.RemoteCreateFolder:
