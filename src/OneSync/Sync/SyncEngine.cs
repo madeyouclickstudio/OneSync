@@ -280,6 +280,8 @@ internal sealed class SyncEngine : IAsyncDisposable
         _recycleBin = new RecycleBinService(_graph, _metadata, _queue, _drives, _auth.Account?.Username, logger);
         _delta = new DeltaPoller(_graph, _metadata, _queue, _placeholders, _drives,
             _config.SyncSettings, _suppressor, logger);
+        _recycleBin.SentToWebRecycleBin += (drive, item) =>
+            _delta.PollFrequently(drive, item.RelativePath, TimeSpan.FromMinutes(10));
 
         _eviction = new LruEvictionService(_metadata, _queue, _suppressor,
             _config.SyncSettings, _drives,

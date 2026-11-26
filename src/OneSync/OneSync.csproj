@@ -22,9 +22,9 @@
     <Product>OneSync</Product>
     <Company>madeyouclick studio</Company>
     <Copyright>Copyright (c) 2026 madeyouclick studio</Copyright>
-    <FileVersion>1.5.8.0</FileVersion>
-    <AssemblyVersion>1.5.8.0</AssemblyVersion>
-    <Version>1.5.8</Version>
+    <FileVersion>1.5.9.0</FileVersion>
+    <AssemblyVersion>1.5.9.0</AssemblyVersion>
+    <Version>1.5.9</Version>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">

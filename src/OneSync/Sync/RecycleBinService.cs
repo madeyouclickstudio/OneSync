@@ -27,6 +27,10 @@ internal sealed class RecycleBinService
 
     public event Action<DeletedItem>? ItemRestored;
 
+    /// <summary>The user was sent to the web recycle bin to restore this item, as
+    /// Graph can't restore from a work or school recycle bin.</summary>
+    public event Action<DriveConfig, DeletedItem>? SentToWebRecycleBin;
+
     public RecycleBinService(
         GraphHttpClient graph,
         MetadataStore metadata,
@@ -97,6 +101,7 @@ internal sealed class RecycleBinService
                     item.DriveLetter, item.RelativePath);
                 await OpenWebRecycleBinAsync(drive, ct);
                 _metadata.RemoveDeleted(item.Key);
+                try { SentToWebRecycleBin?.Invoke(drive, item); } catch { }
                 return (true, null);
             }
 

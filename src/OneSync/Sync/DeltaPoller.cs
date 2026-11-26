@@ -89,21 +89,73 @@ internal sealed class DeltaPoller : IAsyncDisposable
         catch (Exception ex) { _logger.Warning(ex, "Initial delta pass failed"); }
 
         var interval = TimeSpan.FromSeconds(Math.Max(60, _settings.DeltaQueryIntervalSeconds));
+        var nextFull = DateTime.UtcNow + interval;
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(interval, ct);
+                var (boostDrive, boostPath, boostUntil) = GetBoost();
+                bool boosting = boostDrive != null && DateTime.UtcNow < boostUntil;
+                var wait = nextFull - DateTime.UtcNow;
+                if (boosting && wait > BoostInterval) wait = BoostInterval;
+                if (wait > TimeSpan.Zero)
+                    await _wake.WaitAsync(wait, ct);
+
                 if (_pause?.IsPaused() == true)
                 {
                     _logger.Debug("Delta poll skipped (paused)");
+                    nextFull = DateTime.UtcNow + interval;
                     continue;
                 }
-                await RunOnceAsync(ct);
+
+                if (DateTime.UtcNow >= nextFull)
+                {
+                    await RunOnceAsync(ct);
+                    nextFull = DateTime.UtcNow + interval;
+                }
+                else
+                {
+                    (boostDrive, boostPath, boostUntil) = GetBoost();
+                    if (boostDrive == null || DateTime.UtcNow >= boostUntil) continue;
+                    await PollDriveAsync(boostDrive, ct);
+                    if (boostPath != null && _metadata.Get(boostDrive.ConfigId, boostPath) != null)
+                    {
+                        _logger.Information("{Path} is back on {Letter}:", boostPath, boostDrive.Letter);
+                        lock (_boostLock) _boostDrive = null;
+                    }
+                }
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) { _logger.Warning(ex, "Periodic delta pass failed"); }
         }
+    }
+
+    // After the user is sent to the web recycle bin, one drive is polled every
+    // 15 seconds until the restored item turns up (or 10 minutes pass), so it
+    // appears here within seconds rather than at the next full pass.
+    private static readonly TimeSpan BoostInterval = TimeSpan.FromSeconds(15);
+    private readonly SemaphoreSlim _wake = new(0);
+    private readonly object _boostLock = new();
+    private DriveConfig? _boostDrive;
+    private string? _boostPath;
+    private DateTime _boostUntil;
+
+    public void PollFrequently(DriveConfig drive, string? relativePath, TimeSpan duration)
+    {
+        lock (_boostLock)
+        {
+            _boostDrive = drive;
+            _boostPath = relativePath;
+            _boostUntil = DateTime.UtcNow + duration;
+        }
+        _logger.Information("Polling {Letter}: every {Seconds}s while {Path} is restored", drive.Letter,
+            BoostInterval.TotalSeconds, relativePath ?? "an item");
+        try { _wake.Release(); } catch (SemaphoreFullException) { }
+    }
+
+    private (DriveConfig? Drive, string? Path, DateTime Until) GetBoost()
+    {
+        lock (_boostLock) return (_boostDrive, _boostPath, _boostUntil);
     }
 
     public async Task RunOnceAsync(CancellationToken ct)
